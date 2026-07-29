@@ -43,12 +43,12 @@ This folder contains the codes for Example 1. It considers a Stokes--Darcy coupl
 ### Case 4.1.1
 
 Case 4.1.1 is motivated by surface water flow over a permeable riverbed sediment layer. The computational domain is $\Omega=[0,2]\times[0,1]$, where an elliptical porous-medium region is embedded in the lower part of the domain:
-$$
+$
 \Omega_p=
 \left\{(x,y)\in\mathbb{R}^2:
 \frac{(x-1)^2}{0.5^2}+\frac{y^2}{0.4^2}\leq 1,\ y\geq 0
 \right\}.
-$$
+$
 The parameters are $\beta_1=1000$, $\beta_2=1.0$, $V_0=1.1|\Omega_f^0|$, $\mu_f=1$, $k_p=10^{-4}$.
 
 The code solves the state and adjoint systems, computes the shape gradient, and updates the fluid--porous interface by the moving-mesh method. It also evaluates the mass-conservation residual in the Stokes region and the residuals of the Stokes--Darcy interface conditions, including the normal-flux condition, the normal-stress balance, and the Beavers--Joseph--Saffman condition. This case shows that the interface evolves into a smoother shape, the energy dissipation decreases, and the coupling conditions are accurately enforced while the volume constraint is maintained.
