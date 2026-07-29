@@ -58,7 +58,7 @@ Case 4.1.2 considers another initial single-interface geometry with a more stron
 
 ## Sec 4.2 Multi-interface Optimization in an L-shaped Configuration
 
-This folder contains the code for Example 2. It considers a multi-interface shape optimization problem in a two-dimensional L-shaped configuration. The computational domain is $\Omega=[0,1]^2$. A uniform inlet velocity $\bm u_d=[1,0]^T$ is imposed. The main parameters are $\mu_f=0.5$, $k_p=5\times 10^{-5}$, $\beta_1=150$, $\beta_2=10^{-3}$, $V_0=0.6|\Omega_f^0|$. Compared with Sec 4.1, this example contains multiple fluid--porous interface components and non-smooth geometric features. The code constructs the L-shaped geometry, solves the Stokes--Darcy state and adjoint systems, computes the distributed Eulerian derivative, and moves all admissible interface components during the optimization process. A perimeter regularization term is included to smooth the interface evolution.
+This folder contains the code for Example 2. It considers a multi-interface shape optimization problem in a two-dimensional L-shaped configuration. The computational domain is $\Omega=[0,1]^2$. A uniform inlet velocity $u_d=[1,0]^T$ is imposed. The main parameters are $\mu_f=0.5$, $k_p=5\times 10^{-5}$, $\beta_1=150$, $\beta_2=10^{-3}$, $V_0=0.6|\Omega_f^0|$. Compared with Sec 4.1, this example contains multiple fluid--porous interface components and non-smooth geometric features. The code constructs the L-shaped geometry, solves the Stokes--Darcy state and adjoint systems, computes the distributed Eulerian derivative, and moves all admissible interface components during the optimization process. A perimeter regularization term is included to smooth the interface evolution.
 
 ## Sec 4.3 Diffuser Model
 
