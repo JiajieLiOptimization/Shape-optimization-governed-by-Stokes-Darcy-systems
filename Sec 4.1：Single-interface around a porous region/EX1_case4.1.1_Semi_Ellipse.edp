@@ -1,0 +1,769 @@
+// =====================================================================//
+//            Stokes‑Darcy_ShapeOpt_Case4.1.1                           //
+//                Zhou, Li, Li, Zhu (2026)                              //
+//               H¹ gradient flow algorithm                             //
+// Implements Example1‑Case4.1.1: elliptic porous domain at bottom.     //
+// Stokes‑Darcy shape optimization to minimize free‑flow energy loss.   //
+// =====================================================================//
+
+load "iovtk"
+
+string caption3="function";
+
+/* ==================== PHYSICAL PARAMETERS ==================== */
+real mu = 0.0001;
+real kp = 1.0;
+real gcoef = 1.0;
+real coeffBJS = 1.0;
+
+real tol=0.0005;
+
+int n=20;
+int fluidInt = 2;
+int DarcyInt = 7;
+
+// Macro definitions
+macro bilin1(u1,u2,v1,v2) (dx(u1)*dx(v1) + 0.5*(dy(u1)+dx(u2))*(dy(v1)+dx(v2)) + dy(u2)*dy(v2)) //
+macro bilin2(u1,u2,v1,v2) (dx(u1)*dx(v1)+dy(u1)*dy(v1)+dx(u2)*dx(v2)+dy(u2)*dy(v2)) //
+macro grad(p) [dx(p),dy(p)] //
+macro div(u1,u2) (dx(u1)+dy(u2)) //
+macro Ptau(u1,u2) [(u1*N.y- u2*N.x)*N.y, (u1*N.y- u2*N.x)*(-N.x)] //
+
+macro EuDvDV(u1, u2, v1, v2, theta1, theta2) (dx(u1) * (dx(v1)*dx(theta1) + dy(v1)*dx(theta2))
+                                     + 0.5*(dy(u1)+dx(u2)) * (dx(v1)*dy(theta1) + dy(v1)*dy(theta2))
+                                     + 0.5*(dx(u2)+dy(u1)) * (dx(v2)*dx(theta1) + dy(v2)*dx(theta2))
+                                     + dy(u2) * (dx(v2)*dy(theta1) + dy(v2)*dy(theta2)))//
+
+macro DuDvT(u1, u2, v1, v2) (dx(u1)*dx(v1) + dy(u1)*dx(v2)+dx(u2)*dy(v1) + dy(u2)*dy(v2))//
+macro Duv(u1, u2, v1, v2) [dx(u1)*v1 + dy(u1)*v2, dx(u2)*v1 + dy(u2)*v2]//
+macro DuTDpDq(u1, u2, p, q) (dx(q)*(dx(u1)*dx(p)+dx(u2)*dy(p))+dy(q)*(dy(u1)*dx(p)+dy(u2)*dy(p)))//
+
+macro GradDiv(u1, u2) [dx(u1)*N.x+dx(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.x,
+                       dy(u1)*N.x+dy(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.y]//
+
+macro GradDiv2(u1, u2, v1, v2) (v1*(dx(u1)*N.x+dx(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.x)
+                     +v2*(dy(u1)*N.x+dy(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.y))//
+
+macro DVnn(v1, v2) (N.x*(N.x*dx(theta1)+N.y*dy(theta1))+N.y*(N.x*dx(theta2)+N.y*dy(theta2)))//
+macro DuvV(u1, u2, v1, v2, theta1, theta2) (theta1*(dx(u1)*v1+dy(u1)*v2)+theta2*(dx(u2)*v1+dy(u2)*v2))//
+
+macro symbilin(d1,d2,theta1,theta2) (dx(d1)*dx(theta1)+(dy(d1)+dx(d2))*(dy(theta1)+dx(theta2))/2+dy(d2)*dy(theta2))//
+
+macro Biholomorphic(d1,d2,theta1,theta2) ((-dx(d1)+dy(d2))*(-dx(theta1)+dy(theta2))+(dy(d1)+dx(d2))*(dy(theta1)+dx(theta2)))//
+
+// Domain boundaries
+border Cu1(t=0.0, 0.5){x=t; y=0.0;label=1;};
+border Cu2(t=pi, 0.0){x=1+0.5*cos(t); y=0.4*sin(t);label=fluidInt;};
+border Cu3(t=1.5, 2.0){x=t; y=0.0;label=3;};
+border Cu4(t=0.0,1.0) {x=2.0;y=t;label=4;};
+border Cu5(t=2.0,0.0) {x=t;y=1.0;label=5;};
+border Cu6(t=1.0,0.0){x=0.0; y=t;label=6;};
+
+mesh Th1 = buildmesh(Cu1(n)+Cu2(3*n)+Cu3(n)+Cu4(2*n)+Cu5(4*n)+Cu6(2*n));
+
+border Cl1(t=0, pi){x=1+0.5*cos(t); y=0.4*sin(t);label= DarcyInt;};
+border Cl2(t=0.5, 1.5){x=t; y=0.0;label=8;};
+
+mesh Th2 = buildmesh(Cl1(3*n)+Cl2(2*n));
+mesh Th = Th1+Th2;
+
+// Boundary conditions and source terms
+func u01=0.25*y*(1-y);
+func u02=0;
+func fx = 0;
+func fy = 0;
+func fp = 0;
+func dxfx = 0;
+func dyfx = 0;
+func dxfy = 0;
+func dyfy = 0;
+func dxfp = 0;
+func dyfp = 0;
+
+// Finite element spaces
+fespace Vh1(Th1, P1b);
+// fespace Vh1(Th1, P2);
+fespace Wh1(Th1, P1);
+fespace Wh2(Th2, P1);
+fespace Wh(Th,P1);
+
+// Variables for Stokes-Darcy system
+Vh1 uf1,uf2,vf1,vf2;
+Wh1 p,q;
+Wh2 phi,psi;
+
+// Variables for adjoint system
+Vh1 yf1,yf2,xf1,xf2;
+Wh1 r,e;
+Wh2 eta,xi;
+
+// Variables for shape derivatives
+Wh d1,d2,theta1,theta2;
+
+// Optimization parameters
+real Jnew =1.0;
+real Jold = 0.5;
+real step = 0.1;
+real temp;
+int iter;
+int maxIter = 250;
+
+// Lagrange multiplier
+real lagrange = 0.0;
+
+// Volume constraints
+real volume;
+volume=int2d(Th1)(1.0);
+real VolTarg = 1.1*int2d(Th1)(1.0);
+real beta = 1000;
+real beta1 = 1.0;
+real CR = 1.0/2.5;
+
+bool saveFirstStep = true;
+
+// Timer and quantitative data
+real timeStart = clock();
+
+real Jinit = 0.0;     
+real Jfinal = 0.0;
+real Jreduction = 0.0;
+
+real Ginit = 0.0;    
+real Gfinal = 0.0;
+real Greduction = 0.0;
+
+real VolInit = int2d(Th1)(1.0);
+real VolFinal = 0.0;
+real VolError = 0.0;
+real VolErrorRel = 0.0;
+
+real cpuTime = 0.0;
+
+int Niter = 0;
+int convFlag = 0;
+
+int NeFluid = 0;
+int NePorous = 0;
+int NvFluid = 0;
+int NvPorous = 0;
+
+real gradNormFinal = 0.0;
+real lastStep = step;
+real meshQuality = 0.0;
+
+// Absolute residuals
+real resDiv = 0.0;
+real resFlux = 0.0;
+real resNormal = 0.0;
+real resBJS = 0.0;
+
+// Initial solve
+solve StokesDarcyInit(<[uf1],[uf2],[p],[phi]>, <[vf1],[vf2],[q],[psi]>)
+= int2d(Th1)( 2*mu*(bilin1(uf1,uf2,vf1,vf2)))
++ int2d(Th2)(kp*gcoef*grad(phi)'*grad(psi))
+- int2d(Th1)(p*div(vf1,vf2))
+- int2d(Th1)(q*div(uf1,uf2))
++ int1d(Th1,fluidInt)(coeffBJS*(Ptau(uf1,uf2)'*Ptau(vf1,vf2)))
++ int1d(Th1,fluidInt)(gcoef*(phi*(vf1*N.x+vf2*N.y)))
+- int1d(Th1,fluidInt)(gcoef*((uf1*N.x+uf2*N.y)*psi))
++ int2d(Th1)(p*q*1e-8)
+- int2d(Th1)(fx*vf1 + fy*vf2)
+- int2d(Th2) (gcoef*fp*psi)
++ on(6,uf1=u01,uf2=u02) + on(1,3,5,uf1=0,uf2=0) + on(8,phi=0);
+
+real pVolInit = int2d(Th1)(p) / int2d(Th1)(1.0);
+p = p - pVolInit;
+
+
+Jinit = int2d(Th1)( 2*mu*(bilin1(uf1,uf2,uf1,uf2)));
+// Ginit = Jinit + lagrange*(VolInit - VolTarg) + 0.5*beta*(VolInit - VolTarg)^2;
+Ginit = Jinit + 0.5*beta*(VolInit - VolTarg)^2;
+
+ofstream histFile("history.txt");
+histFile << "iter Jraw G volerr volrel gradnorm step meshqual" << endl;
+
+// Main optimization loop
+for(iter = 1; iter <= maxIter; iter++)
+{
+    cout << "Iteration " << iter << " ----" << endl;
+
+    if(iter > 1) {
+        temp = (abs(Jnew - Jold) / abs(Jold));
+        if(temp < tol && iter > 10) {
+            convFlag = 1;
+            Niter = iter;
+            cout << "Converged after " << iter << " iterations" << endl;
+            break;
+        }
+    }
+    Jold = Jnew;
+
+    // Solve Stokes-Darcy coupled system
+    solve StokesDarcy(<[uf1],[uf2],[p],[phi]>, <[vf1],[vf2],[q],[psi]>)
+    = int2d(Th1)( 2*mu*(bilin1(uf1,uf2,vf1,vf2)))
+    + int2d(Th2)(kp*gcoef*grad(phi)'*grad(psi))
+    - int2d(Th1)(p*div(vf1,vf2))
+    - int2d(Th1)(q*div(uf1,uf2))
+    + int1d(Th1,fluidInt)(coeffBJS*(Ptau(uf1,uf2)'*Ptau(vf1,vf2)))
+    + int1d(Th1,fluidInt)(gcoef*(phi*(vf1*N.x+vf2*N.y)))
+    - int1d(Th1,fluidInt)(gcoef*((uf1*N.x+uf2*N.y)*psi))
+    + int2d(Th1)(p*q*1e-8)
+    - int2d(Th1)(fx*vf1 + fy*vf2)
+    - int2d(Th2) (gcoef*fp*psi)
+    + on(6,uf1=u01,uf2=u02) + on(1,3,5,uf1=0,uf2=0) + on(8,phi=0);
+
+    // Pressure normalization
+    real pVol = int2d(Th1)(p) / int2d(Th1)(1.0);
+    p = p - pVol;
+
+    // Save EPS plots and data files
+    if (iter == 1 || iter % 50 == 0) {
+        string iterStr = iter;
+
+        plot([uf1,uf2], wait=0, value=true, fill=0, ps="uf_iter"+iterStr+".eps");
+        plot(p, value=true, fill=0, wait=0, ps="p_iter"+iterStr+".eps");
+        plot(phi, value=true, fill=0, wait=0, ps="phi_iter"+iterStr+".eps");
+        plot(Th, wait=0, ps="mesh_iter"+iterStr+".eps");
+
+        {
+            ofstream file("uf_iter"+iterStr+".dat");
+            file << "TITLE = \"Velocity Field - Iteration " + iterStr + "\"" << endl;
+            file << "VARIABLES = \"X\", \"Y\", \"U\", \"V\", \"VelocityMagnitude\"" << endl;
+            file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Th1.nv
+                 << ", ELEMENTS=" << Th1.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+            file << "# Physical Parameters: mu=" << mu << ", Iteration: " << iter << endl;
+
+            for (int i = 0; i < Th1.nv; i++) {
+                real xx = Th1(i).x;
+                real yy = Th1(i).y;
+                real uu = uf1(xx, yy);
+                real vv = uf2(xx, yy);
+                real velMag = sqrt(uu^2 + vv^2);
+                file << xx << " " << yy << " " << uu << " " << vv << " " << velMag << endl;
+            }
+
+            for (int i = 0; i < Th1.nt; i++) {
+                file << Th1[i][0]+1 << " " << Th1[i][1]+1 << " " << Th1[i][2]+1 << endl;
+            }
+        }
+
+        {
+            ofstream file("p_iter"+iterStr+".dat");
+            file << "TITLE = \"Pressure Field - Iteration " + iterStr + "\"" << endl;
+            file << "VARIABLES = \"X\", \"Y\", \"Pressure\"" << endl;
+            file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Th1.nv
+                 << ", ELEMENTS=" << Th1.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+            file << "# Physical Parameters: mu=" << mu << ", Iteration: " << iter << endl;
+
+            for (int i = 0; i < Th1.nv; i++) {
+                real xx = Th1(i).x;
+                real yy = Th1(i).y;
+                real pressure = p(xx, yy);
+                file << xx << " " << yy << " " << pressure << endl;
+            }
+
+            for (int i = 0; i < Th1.nt; i++) {
+                file << Th1[i][0]+1 << " " << Th1[i][1]+1 << " " << Th1[i][2]+1 << endl;
+            }
+        }
+
+        {
+            ofstream file("phi_iter"+iterStr+".dat");
+            file << "TITLE = \"Darcy Pressure Field - Iteration " + iterStr + "\"" << endl;
+            file << "VARIABLES = \"X\", \"Y\", \"Phi\"" << endl;
+            file << "ZONE T=\"Porous Domain (Darcy Region)\", NODES=" << Th2.nv
+                 << ", ELEMENTS=" << Th2.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+            file << "# Physical Parameters: kp=" << kp << ", Iteration: " << iter << endl;
+
+            for (int i = 0; i < Th2.nv; i++) {
+                real xx = Th2(i).x;
+                real yy = Th2(i).y;
+                real phival = phi(xx, yy);
+                file << xx << " " << yy << " " << phival << endl;
+            }
+
+            for (int i = 0; i < Th2.nt; i++) {
+                file << Th2[i][0]+1 << " " << Th2[i][1]+1 << " " << Th2[i][2]+1 << endl;
+            }
+        }
+
+        {
+            ofstream file("mesh_iter"+iterStr+".dat");
+            file << "TITLE = \"Mesh - Iteration " << iterStr << "\"" << endl;
+            file << "VARIABLES = \"X\", \"Y\"" << endl;
+            file << "ZONE T=\"Full Domain\", NODES=" << Th.nv
+                 << ", ELEMENTS=" << Th.nt
+                 << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+
+            for (int i = 0; i < Th.nv; i++) {
+                file << Th(i).x << " " << Th(i).y << endl;
+            }
+
+            for (int i = 0; i < Th.nt; i++) {
+                file << Th[i][0]+1 << " "
+                     << Th[i][1]+1 << " "
+                     << Th[i][2]+1 << endl;
+            }
+        }
+
+        string meshvtk = "mesh_iter" + iterStr + ".vtu";
+        savevtk(meshvtk, Th, dataname="Mesh");
+
+        if (saveFirstStep) {
+            saveFirstStep = false;
+        }
+    }
+
+    // Solve adjoint system
+    solve Adjoint(<[yf1],[yf2],[r],[eta]>, <[xf1],[xf2],[e],[xi]>)
+    = int2d(Th1)( 2*mu*(bilin1(yf1,yf2,xf1,xf2)))
+    + int2d(Th2)(kp*gcoef*grad(eta)'*grad(xi))
+    - int2d(Th1)(r*div(xf1,xf2))
+    - int2d(Th1)(e*div(yf1,yf2))
+    + int1d(Th1,fluidInt)(coeffBJS*(Ptau(yf1,yf2)'*Ptau(xf1,xf2)))
+    - int1d(Th1,fluidInt)(gcoef*(eta*(xf1*N.x+xf2*N.y)))
+    + int1d(Th1,fluidInt)(gcoef*((yf1*N.x+yf2*N.y)*xi))
+    + int2d(Th1)(r*e*1e-8)
+    - int2d(Th1)( 4*mu*(bilin1(uf1,uf2,xf1,xf2)))
+    + on(1,3,5,6,yf1=0,yf2=0) + on(8,eta=0);
+
+    // Update objective function
+    real Jraw = int2d(Th1)( 2*mu*(bilin1(uf1,uf2,uf1,uf2)));
+    // Jnew = Jraw + lagrange*(volume - VolTarg) + 0.5*beta*(volume - VolTarg)^2;
+    Jnew = Jraw + 0.5*beta*(volume - VolTarg)^2;
+
+    
+
+    ofstream obj("objective.txt",append);
+    obj << Jnew << endl;
+    cout << "The value of the cost functional: " << Jnew << endl;
+
+    // Update Lagrange multiplier
+    volume=int2d(Th1)(1.0);
+    real VolErr = (VolTarg-volume);
+    ofstream ve("volerr.txt",append);
+    ve << VolErr << endl;
+    cout << "Volume Error: " << VolErr << endl;
+    lagrange=lagrange+beta1*(volume-VolTarg);
+    cout << "lagrange: " << lagrange << endl;
+
+    // Solve shape derivative extension problem
+    solve H1Extension(<[d1],[d2]>,<[theta1],[theta2]>)
+    = int2d(Th)(CR*Biholomorphic(d1,d2,theta1,theta2)+symbilin(d1,d2,theta1,theta2)+d1*theta1+d2*theta2)
+     + int2d(Th1)(-4*mu*(EuDvDV(uf1, uf2, uf1, uf2, theta1, theta2)))
+     + int2d(Th1)(2*mu*(bilin1(uf1, uf2, uf1, uf2)*div(theta1,theta2)))
+     + int2d(Th1)(2*mu*(EuDvDV(yf1, yf2, uf1, uf2, theta1, theta2)))
+     + int2d(Th1)(2*mu*(EuDvDV(uf1, uf2, yf1, yf2, theta1, theta2)))
+     - int2d(Th1)(2*mu*(bilin1(uf1,uf2,yf1,yf2))*div(theta1,theta2))
+     + int2d(Th1)(yf1*(theta1*dxfx+theta2*dyfx)+yf2*(theta1*dxfy+theta2*dyfy))
+     + int2d(Th1)((fx*yf1+fy*yf2)*div(theta1,theta2))
+     - int2d(Th1)((DuDvT(yf1, yf2, theta1, theta2))*p)
+     + int2d(Th2)(kp*gcoef*(DuTDpDq(theta1,theta2, phi, eta)))
+     + int2d(Th2)(kp*gcoef*(DuTDpDq(theta1,theta2, eta, phi)))
+     - int2d(Th2)(kp*gcoef*grad(phi)'*grad(eta)*div(theta1,theta2))
+     + int2d(Th2)(gcoef*eta*(dxfp*theta1+dyfp*theta2))
+     + int2d(Th2)(gcoef*eta*fp*div(theta1,theta2))
+     + int1d(Th1,fluidInt)(gcoef*phi*GradDiv2(theta1,theta2,yf1,yf2))
+     - int1d(Th1,fluidInt)(gcoef*eta*GradDiv2(theta1,theta2,uf1,uf2))
+     - int1d(Th1,fluidInt)(gcoef*phi*(yf1*N.x+yf2*N.y)*(div(theta1,theta2)-DVnn(theta1,theta2)))
+     + int1d(Th1,fluidInt)(gcoef*eta*(uf1*N.x+uf2*N.y)*(div(theta1,theta2)-DVnn(theta1,theta2)))
+     - int1d(Th1,fluidInt)(coeffBJS*GradDiv(theta1,theta2)'*Ptau(yf1,yf2)*(uf1*N.x+uf2*N.y))
+     - int1d(Th1,fluidInt)(coeffBJS*GradDiv(theta1,theta2)'*Ptau(uf1,uf2)*(yf1*N.x+yf2*N.y))
+     - int1d(Th1,fluidInt)(coeffBJS*Ptau(uf1,uf2)'*Ptau(yf1,yf2)*(div(theta1,theta2)-DVnn(theta1,theta2)))
+     - int2d(Th1)(r*(DuDvT(uf1, uf2, theta1, theta2)))
+     + int2d(Th1)((dx(theta1)+dy(theta2))* (lagrange+beta*(volume - VolTarg)))
+     + on(1,3,4,5,6,8,d1=0,d2=0);
+
+    // Compute gradient norm
+    real gradNorm = sqrt(int2d(Th)(d1^2 + d2^2));
+    gradNormFinal = gradNorm;
+    cout << "Gradient norm = " << gradNorm << endl;
+
+    // Adaptive step size selection
+    real safetyFactor = 0.9;
+    real minVal = checkmovemesh(Th,[x,y])*safetyFactor;
+    while(1){
+       real mint = checkmovemesh(Th,[x+step*d1,y+step*d2]);
+       if (mint>minVal) {
+           meshQuality = mint;
+           break;
+       }
+       step=step/2.;
+    }
+
+    lastStep = step;
+
+    real VolRelNow = abs(VolErr) / abs(VolTarg);
+    histFile << iter << " "
+           << Jraw << " "
+           << Jnew << " "
+           << VolErr << " "
+           << VolRelNow << " "
+           << gradNormFinal << " "
+           << lastStep << " "
+           << meshQuality << endl;
+
+    Niter = iter;
+
+    // Mesh deformation
+    fespace Wh1P1(Th1, P1);
+    fespace Wh2P1(Th2, P1);
+
+    Wh1P1 d1fP1, d2fP1;
+    Wh2P1 d1pP1, d2pP1;
+
+    d1fP1 = d1;
+    d2fP1 = d2;
+    d1pP1 = d1;
+    d2pP1 = d2;
+
+    mesh Th1new = movemesh(Th1, [x + step * d1fP1, y + step * d2fP1]);
+    mesh Th2new = movemesh(Th2, [x + step * d1pP1, y + step * d2pP1]);
+
+    Th = Th1new + Th2new;
+    Th1 = Th1new;
+    Th2 = Th2new;
+
+    plot([uf1,uf2], wait=0, cmm="Optimized Th mesh iteration: " + iter );
+}
+
+/// END OF THE OPTIMIZATION LOOP /////
+
+solve StokesDarcyFinal(<[uf1],[uf2],[p],[phi]>, <[vf1],[vf2],[q],[psi]>)
+= int2d(Th1)( 2*mu*(bilin1(uf1,uf2,vf1,vf2)))
++ int2d(Th2)(kp*gcoef*grad(phi)'*grad(psi))
+- int2d(Th1)(p*div(vf1,vf2))
+- int2d(Th1)(q*div(uf1,uf2))
++ int1d(Th1,fluidInt)(coeffBJS*(Ptau(uf1,uf2)'*Ptau(vf1,vf2)))
++ int1d(Th1,fluidInt)(gcoef*(phi*(vf1*N.x+vf2*N.y)))
+- int1d(Th1,fluidInt)(gcoef*((uf1*N.x+uf2*N.y)*psi))
++ int2d(Th1)(p*q*1e-8)
+- int2d(Th1)(fx*vf1 + fy*vf2)
+- int2d(Th2) (gcoef*fp*psi)
++ on(6,uf1=u01,uf2=u02) + on(1,3,5,uf1=0,uf2=0) + on(8,phi=0);
+
+real pVolFinal = int2d(Th1)(p) / int2d(Th1)(1.0);
+p = p - pVolFinal;
+
+// ============================================================
+// Absolute and relative residuals at optimized configuration
+// All interface residuals use n_f = N (outward normal of Omega_f)
+// tau = (-N.y, N.x) in 2D
+// ============================================================
+
+real epsRes = 1e-14;
+
+// Macros for interface quantities (use macros to ensure correct N in int1d)
+macro un() (uf1*N.x + uf2*N.y) //
+macro ut() (uf1*(-N.y) + uf2*N.x) //
+macro gradPhiN() (dx(phi)*N.x + dy(phi)*N.y) //
+
+macro En1() (N.x*dx(uf1) + 0.5*N.y*(dy(uf1) + dx(uf2))) //
+macro En2() (0.5*N.x*(dy(uf1) + dx(uf2)) + N.y*dy(uf2)) //
+macro nEn() (N.x*En1 + N.y*En2) //
+macro tauEn() ((-N.y)*En1 + N.x*En2) //
+
+// ---------- 1. Mass conservation ----------
+resDiv = sqrt(int2d(Th1)(div(uf1, uf2)^2));
+
+real normGradU = sqrt(int2d(Th1)(
+    dx(uf1)^2 + dy(uf1)^2 + dx(uf2)^2 + dy(uf2)^2
+));
+real relDiv = resDiv / max(normGradU, epsRes);
+
+// ---------- 2. Interface flux ----------
+resFlux = sqrt(int1d(Th1, fluidInt)((un + kp*gradPhiN)^2));
+
+real normFluxRef = sqrt(int1d(Th1, fluidInt)(un^2))
+                 + sqrt(int1d(Th1, fluidInt)((kp*gradPhiN)^2));
+real relFlux = resFlux / max(normFluxRef, epsRes);
+
+real normUInterface = sqrt(int1d(Th1, fluidInt)(uf1^2 + uf2^2));
+real relFluxU = resFlux / max(normUInterface, epsRes);
+
+// ---------- 3. Normal stress ----------
+resNormal = sqrt(int1d(Th1, fluidInt)(
+    (2.0*mu*nEn - p - gcoef*phi)^2
+));
+
+real normNormalRef = sqrt(int1d(Th1, fluidInt)((2.0*mu*nEn)^2))
+                   + sqrt(int1d(Th1, fluidInt)(p^2))
+                   + sqrt(int1d(Th1, fluidInt)((gcoef*phi)^2));
+real relNormal = resNormal / max(normNormalRef, epsRes);
+
+// ---------- 4. BJS tangential ----------
+resBJS = sqrt(int1d(Th1, fluidInt)(
+    (-2.0*mu*tauEn + coeffBJS*ut)^2
+));
+
+real normBJSRef = sqrt(int1d(Th1, fluidInt)((2.0*mu*tauEn)^2))
+                + sqrt(int1d(Th1, fluidInt)((coeffBJS*ut)^2));
+real relBJS = resBJS / max(normBJSRef, epsRes);
+
+// ---------- 5. Diagnostics ----------
+real normP = sqrt(int1d(Th1, fluidInt)(p^2));
+real normVisNormal = sqrt(int1d(Th1, fluidInt)((2.0*mu*nEn)^2));
+real normPhi = sqrt(int1d(Th1, fluidInt)((gcoef*phi)^2));
+real normVisTangential = sqrt(int1d(Th1, fluidInt)((2.0*mu*tauEn)^2));
+real normBJSSlip = sqrt(int1d(Th1, fluidInt)((coeffBJS*ut)^2));
+
+// Optional sign diagnostics
+real resNormalAlt = sqrt(int1d(Th1, fluidInt)(
+    (2.0*mu*nEn - p + gcoef*phi)^2
+));
+real resBJSAlt = sqrt(int1d(Th1, fluidInt)(
+    (-2.0*mu*tauEn - coeffBJS*ut)^2
+));
+
+VolFinal = int2d(Th1)(1.0);
+VolError = VolTarg - VolFinal;
+VolErrorRel = abs(VolError) / abs(VolTarg);
+
+Jfinal = int2d(Th1)( 2*mu*(bilin1(uf1,uf2,uf1,uf2)));
+Jreduction = (Jinit - Jfinal) / abs(Jinit);
+
+// Gfinal = Jfinal + lagrange*(VolFinal - VolTarg) + 0.5*beta*(VolFinal - VolTarg)^2;
+Gfinal = Jfinal + 0.5*beta*(VolFinal - VolTarg)^2;
+Greduction = (Ginit - Gfinal) / abs(Ginit);
+
+NeFluid = Th1.nt;
+NePorous = Th2.nt;
+NvFluid = Th1.nv;
+NvPorous = Th2.nv;
+cpuTime = clock() - timeStart;
+
+
+
+
+// Save final EPS plots
+plot([uf1,uf2], wait=true, value=true, fill=0, ps=caption3+"_uf.eps");
+plot(p, value=true, fill=0, wait=true, ps=caption3+"_p.eps");
+plot(phi, value=true, fill=0, wait=true, ps=caption3+"_phi.eps");
+plot(Th, wait=1, ps="finalmesh.eps");
+
+// Save final data files for Tecplot
+{
+    ofstream file(caption3+"_uf.dat");
+    file << "TITLE = \"Final Velocity Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"U\", \"V\", \"VelocityMagnitude\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Th1.nv
+         << ", ELEMENTS=" << Th1.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+    file << "# Final solution, Physical Parameters: mu=" << mu << endl;
+
+    for (int i = 0; i < Th1.nv; i++) {
+        real xx = Th1(i).x;
+        real yy = Th1(i).y;
+        real uu = uf1(xx, yy);
+        real vv = uf2(xx, yy);
+        real velMag = sqrt(uu^2 + vv^2);
+        file << xx << " " << yy << " " << uu << " " << vv << " " << velMag << endl;
+    }
+
+    for (int i = 0; i < Th1.nt; i++) {
+        file << Th1[i][0]+1 << " " << Th1[i][1]+1 << " " << Th1[i][2]+1 << endl;
+    }
+}
+
+{
+    ofstream file(caption3+"_p.dat");
+    file << "TITLE = \"Final Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Pressure\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Th1.nv
+         << ", ELEMENTS=" << Th1.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+    file << "# Final solution, Physical Parameters: mu=" << mu << endl;
+
+    for (int i = 0; i < Th1.nv; i++) {
+        real xx = Th1(i).x;
+        real yy = Th1(i).y;
+        real pressure = p(xx, yy);
+        file << xx << " " << yy << " " << pressure << endl;
+    }
+
+    for (int i = 0; i < Th1.nt; i++) {
+        file << Th1[i][0]+1 << " " << Th1[i][1]+1 << " " << Th1[i][2]+1 << endl;
+    }
+}
+
+{
+    ofstream file(caption3+"_phi.dat");
+    file << "TITLE = \"Final Darcy Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Phi\"" << endl;
+    file << "ZONE T=\"Porous Domain (Darcy Region)\", NODES=" << Th2.nv
+         << ", ELEMENTS=" << Th2.nt << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+    file << "# Final solution, Physical Parameters: kp=" << kp << endl;
+
+    for (int i = 0; i < Th2.nv; i++) {
+        real xx = Th2(i).x;
+        real yy = Th2(i).y;
+        real phival = phi(xx, yy);
+        file << xx << " " << yy << " " << phival << endl;
+    }
+
+    for (int i = 0; i < Th2.nt; i++) {
+        file << Th2[i][0]+1 << " " << Th2[i][1]+1 << " " << Th2[i][2]+1 << endl;
+    }
+}
+
+// ================== Final mesh (DAT) ==================
+{
+    ofstream file("finalmesh.dat");
+    file << "TITLE = \"Final Mesh\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\"" << endl;
+    file << "ZONE T=\"Full Domain\", NODES=" << Th.nv
+         << ", ELEMENTS=" << Th.nt
+         << ", DATAPACKING=POINT, ZONETYPE=FETRIANGLE" << endl;
+
+    for (int i = 0; i < Th.nv; i++) {
+        file << Th(i).x << " " << Th(i).y << endl;
+    }
+
+    for (int i = 0; i < Th.nt; i++) {
+        file << Th[i][0]+1 << " "
+             << Th[i][1]+1 << " "
+             << Th[i][2]+1 << endl;
+    }
+}
+
+// ================== Final mesh (VTK) ==================
+savevtk("finalmesh.vtu", Th, dataname="FinalMesh");
+
+// Save VTK file for other post-processing
+string outputFile1 = caption3 + "_Solution.vtu";
+savevtk(outputFile1, Th, [uf1, uf2], p, phi, dataname="Velocity Pressure Potential");
+
+// ============================================================
+// Write quantitative data to file
+// ============================================================
+ofstream qout("quantitative.txt");
+
+qout << "Quantitative results" << endl;
+qout << endl;
+
+qout << "case" << endl;
+qout << caption3 << endl;
+qout << endl;
+
+qout << "physical parameters" << endl;
+qout << "mu " << mu << endl;
+qout << "kp " << kp << endl;
+qout << "gcoef " << gcoef << endl;
+qout << "coeffBJS " << coeffBJS << endl;
+qout << endl;
+
+qout << "algorithmic parameters" << endl;
+qout << "tol " << tol << endl;
+qout << "maxIter " << maxIter << endl;
+qout << "beta " << beta << endl;
+qout << "beta1 " << beta1 << endl;
+qout << "CR " << CR << endl;
+qout << "initialStep " << 0.1 << endl;
+qout << "lastStep " << lastStep << endl;
+qout << "convFlag " << convFlag << endl;
+qout << endl;
+
+qout << "volume data" << endl;
+qout << "VolInit " << VolInit << endl;
+qout << "VolTarg " << VolTarg << endl;
+qout << "VolFinal " << VolFinal << endl;
+qout << "VolError " << VolError << endl;
+qout << "VolErrorRel " << VolErrorRel << endl;
+qout << endl;
+
+qout << "optimization results" << endl;
+qout << "Jinit " << Jinit << endl;
+qout << "Jfinal " << Jfinal << endl;
+qout << "Jreduction " << Jreduction << endl;
+qout << "Ginit " << Ginit << endl;
+qout << "Gfinal " << Gfinal << endl;
+qout << "Greduction " << Greduction << endl;
+qout << "Niter " << Niter << endl;
+qout << "NeFluid " << NeFluid << endl;
+qout << "NePorous " << NePorous << endl;
+qout << "NvFluid " << NvFluid << endl;
+qout << "NvPorous " << NvPorous << endl;
+qout << "cpuTime " << cpuTime << endl;
+qout << "gradNormFinal " << gradNormFinal << endl;
+qout << "meshQuality " << meshQuality << endl;
+qout << endl;
+
+qout << "absolute residuals" << endl;
+qout << "resDiv " << resDiv << endl;
+qout << "resFlux " << resFlux << endl;
+qout << "resNormal " << resNormal << endl;
+qout << "resBJS " << resBJS << endl;
+qout << endl;
+
+qout << "relative residuals" << endl;
+qout << "relDiv " << relDiv << endl;
+qout << "relFlux " << relFlux << endl;
+qout << "relNormal " << relNormal << endl;
+qout << "relBJS " << relBJS << endl;
+qout << endl;
+
+qout << "normal stress component norms (for diagnostics)" << endl;
+qout << "normP " << normP << endl;
+qout << "normVisNormal " << normVisNormal << endl;
+qout << "normPhi " << normPhi << endl;
+qout << endl;
+
+qout << "latex row: optimization" << endl;
+qout << caption3 << " & "
+      << Jinit << " & "
+      << Jfinal << " & "
+      << Jreduction << " & "
+      << Ginit << " & "
+      << Gfinal << " & "
+      << Greduction << " & "
+      << VolErrorRel << " & "
+      << Niter << " & "
+      << "(" << NeFluid << "," << NePorous << ")" << " & "
+      << "(" << NvFluid << "," << NvPorous << ")" << " & "
+      << cpuTime << " \\\\" << endl;
+qout << endl;
+
+qout << "latex row: residuals (absolute)" << endl;
+qout << caption3 << " & "
+      << resDiv << " & "
+      << resFlux << " & "
+      << resNormal << " & "
+      << resBJS << " \\\\" << endl;
+qout << endl;
+
+qout << "latex row: residuals (relative)" << endl;
+qout << caption3 << " & "
+      << relDiv << " & "
+      << relFlux << " & "
+      << relNormal << " & "
+      << relBJS << " \\\\" << endl;
+
+cout << endl;
+cout << "========================================" << endl;
+cout << "QUANTITATIVE RESULTS" << endl;
+cout << "========================================" << endl;
+cout << "Jinit (raw dissipation)    = " << Jinit << endl;
+cout << "Jfinal (raw dissipation)   = " << Jfinal << endl;
+cout << "Jreduction                 = " << Jreduction << endl;
+cout << "Ginit (augmented Lagr.)    = " << Ginit << endl;
+cout << "Gfinal (augmented Lagr.)   = " << Gfinal << endl;
+cout << "Greduction                 = " << Greduction << endl;
+cout << "VolErrorRel                = " << VolErrorRel << endl;
+cout << "Niter                      = " << Niter << endl;
+cout << "Mesh fluid/porous elements = " << NeFluid << "/" << NePorous << endl;
+cout << "Mesh fluid/porous nodes    = " << NvFluid << "/" << NvPorous << endl;
+cout << "cpuTime                    = " << cpuTime << " s" << endl;
+cout << "--- Absolute residuals ---" << endl;
+cout << "resDiv    (mass)          = " << resDiv << endl;
+cout << "resFlux   (flux)          = " << resFlux << endl;
+cout << "resNormal (normal stress) = " << resNormal << endl;
+cout << "resBJS    (BJS)           = " << resBJS << endl;
+cout << "--- Relative residuals ---" << endl;
+cout << "relDiv    (mass)          = " << relDiv << endl;
+cout << "relFlux   (flux)          = " << relFlux << endl;
+cout << "relNormal (normal stress) = " << relNormal << endl;
+cout << "relBJS    (BJS)           = " << relBJS << endl;
+cout << "--- Normal stress component norms (diagnostics) ---" << endl;
+cout << "||p||          = " << normP << endl;
+cout << "||2mu n.E.n||  = " << normVisNormal << endl;
+cout << "||g phi||      = " << normPhi << endl;
+cout << "========================================" << endl;
+cout << "Data written to quantitative.txt" << endl;
