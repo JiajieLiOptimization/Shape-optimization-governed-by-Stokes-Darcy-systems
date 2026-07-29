@@ -46,7 +46,7 @@ Case 4.1.1 is motivated by surface water flow over a permeable riverbed sediment
 $
 \Omega_p=
 (x,y)\in R^2:
-\frac{(x-1)^2}{0.5^2}+\frac{y^2}{0.4^2}\leq 1, y\geq 0.
+{(x-1)^2}/{0.5^2}+{y^2}/{0.4^2}\leq 1, y\geq 0.
 $
 The parameters are $\beta_1=1000$, $\beta_2=1.0$, $V_0=1.1|\Omega_f^0|$, $\mu_f=1$, $k_p=10^{-4}$.
 
