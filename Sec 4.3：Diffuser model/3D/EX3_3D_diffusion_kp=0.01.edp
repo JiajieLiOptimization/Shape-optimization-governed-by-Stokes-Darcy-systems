@@ -1,0 +1,791 @@
+// =====================================================================//
+//            Stokes-Darcy_ShapeOpt_Example3_3D                          //
+//                   Zhou, Li, Li, Zhu (2026)                           //
+//                     H¹ gradient flow algorithm                       //
+// Implements Sec. 4.3.2: three-dimensional porous-walled diffuser.      //
+// Stokes‑Darcy shape optimization to minimize free‑flow energy loss.   //
+// =====================================================================//
+load "iovtk";
+string caption3="diffuser3D_kp001";
+
+load "gmsh"
+load "medit"
+
+mesh3 Th = gmshload3("diffusion.msh");
+mesh3 Thf = trunc(Th, region == 1);
+mesh3 Thp = trunc(Th, region == 2);
+int[int] interfaceLabels = [7];
+meshS Gammah = extract(Thf,label=interfaceLabels);
+
+/* ==================== PHYSICAL PARAMETERS ==================== */
+real mu = 1.0;          // Fluid dynamic viscosity, Sec. 4.3
+real kp = 0.01;         // Hydraulic permeability for this run
+real gcoef = 1.0;      // Gravity coefficient
+real alphaBJS = 0.1;   // Beavers-Joseph coefficient, Sec. 4.3.2
+// Isotropic K=kp*I: gamma = alpha_BJS*sqrt(mu*g/kp), cf. Eq. (1.7).
+real coeffBJS = alphaBJS*sqrt(mu*gcoef/kp);
+// FreeFEM++ names the manuscript's fifth-order triangular rule qf5pT.
+
+real tol=1.0e-8;       // Default epsilon_obj stated in Sec. 4
+
+// Macro definitions
+macro bilin1(u1,u2,u3,v1,v2,v3) (dx(u1)*dx(v1) + dy(u2)*dy(v2) + dz(u3)*dz(v3) +
+    0.5*(dy(u1)+dx(u2))*(dy(v1)+dx(v2)) +
+    0.5*(dz(u1)+dx(u3))*(dz(v1)+dx(v3)) +
+    0.5*(dz(u2)+dy(u3))*(dz(v2)+dy(v3))) //EOM
+
+macro bilin2(u1, u2, u3, v1, v2, v3) (
+    dx(u1)*dx(v1) + dy(u1)*dy(v1) + dz(u1)*dz(v1) +
+    dx(u2)*dx(v2) + dy(u2)*dy(v2) + dz(u2)*dz(v2) +
+    dx(u3)*dx(v3) + dy(u3)*dy(v3) + dz(u3)*dz(v3)) //EOM
+
+macro grad(p) [dx(p),dy(p),dz(p)] //EOM
+
+macro div(u1,u2,u3) (dx(u1)+dy(u2)+dz(u3)) //EOM
+
+macro Ptau(u1,u2,u3) [u1 - (u1*N.x + u2*N.y + u3*N.z)*N.x,
+                       u2 - (u1*N.x + u2*N.y + u3*N.z)*N.y,
+                       u3 - (u1*N.x + u2*N.y + u3*N.z)*N.z] //EOM
+
+macro PtauDot(u1,u2,u3, v1,v2,v3) (
+    u1*v1 + u2*v2 + u3*v3
+  - (u1*N.x + u2*N.y + u3*N.z)*(v1*N.x + v2*N.y + v3*N.z)
+) // EOM
+
+
+macro gradN(f) (dx(f)*N.x + dy(f)*N.y +dz(f)*N.z) // EOM
+
+// Surface differential operators on each planar interface triangle.
+macro divTau(a1,a2,a3) (
+    div(a1,a2,a3)
+  - N.x*gradN(a1) - N.y*gradN(a2) - N.z*gradN(a3)) //EOM
+
+macro dnPtauDot(u1,u2,u3,v1,v2,v3) (
+    gradN(u1)*(v1-(v1*N.x+v2*N.y+v3*N.z)*N.x)
+  + gradN(u2)*(v2-(v1*N.x+v2*N.y+v3*N.z)*N.y)
+  + gradN(u3)*(v3-(v1*N.x+v2*N.y+v3*N.z)*N.z)
+  + gradN(v1)*(u1-(u1*N.x+u2*N.y+u3*N.z)*N.x)
+  + gradN(v2)*(u2-(u1*N.x+u2*N.y+u3*N.z)*N.y)
+  + gradN(v3)*(u3-(u1*N.x+u2*N.y+u3*N.z)*N.z)) //EOM
+
+macro dnScalarNormalVec(s,v1,v2,v3) (
+    gradN(s)*(v1*N.x+v2*N.y+v3*N.z)
+  + s*(gradN(v1)*N.x+gradN(v2)*N.y+gradN(v3)*N.z)) //EOM
+
+// Boundary conditions and source terms
+func u01 = 0;
+func u02 = 1.0;
+func u03 = 0;
+func fx = 0;
+func fy = 0;
+func fz = 0;
+func fp = 0;
+func dxfx = 0;
+func dyfx = 0;
+func dzfx = 0;
+func dxfy = 0;
+func dyfy = 0;
+func dzfy = 0;
+func dxfz = 0;
+func dyfz = 0;
+func dzfz = 0;
+func dxfp = 0;
+func dyfp = 0;
+func dzfp = 0;
+
+// Finite element spaces
+fespace Vh(Thf, P1b);  // Velocity space (P2)
+fespace Qh(Thf, P1);  // Pressure space (P1)
+fespace Wh(Thp, P1);  // Darcy pressure space (P1)
+fespace Wpf(Th,P1);
+
+// Variables for Stokes-Darcy system
+Vh uf1, uf2, uf3, vf1, vf2, vf3;
+Qh p, q;
+Wh phi, psi;
+
+// Compute velocity magnitude
+Vh velocityMagnitude;
+
+// Variables for adjoint system
+Vh yf1,yf2,yf3,xf1,xf2,xf3;
+Qh r,e;
+Wh eta,xi;
+
+// Variables for shape derivatives
+Wpf d1,d2,d3,theta1,theta2,theta3;
+
+// Surface P1 normal and curvature reconstruction used in Sec. 4.3.2.
+fespace Sh(Gammah,P1);
+Sh N1,N2,N3,W1,W2,W3,Hmean,normN;
+// Continuous surface-P1 representations of G3 and of the vector field
+// whose surface divergence defines G4 (Sec. 3.1 of the manuscript).
+Sh G31,G32,G33,A41,A42,A43;
+fespace Sh0(Gammah,P0);
+Sh0 N01,N02,N03;
+
+// Complete Hadamard density from Theorem 2.3:
+// G = G1 - G2 + div_Gamma(G3) - H*G3.n + G4.
+macro Gdensity(dummy) (
+      (2*mu*bilin1(uf1,uf2,uf3,uf1,uf2,uf3))
+    - (2*mu*bilin1(uf1,uf2,uf3,yf1,yf2,yf3))
+    + p*div(yf1,yf2,yf3)
+    + r*div(uf1,uf2,uf3)
+    + fx*yf1+fy*yf2+fz*yf3
+    - coeffBJS*(dnPtauDot(uf1,uf2,uf3,yf1,yf2,yf3)
+                  + Hmean*PtauDot(uf1,uf2,uf3,yf1,yf2,yf3))
+    - gcoef*(dnScalarNormalVec(phi,yf1,yf2,yf3)
+                  + Hmean*phi*(yf1*N.x+yf2*N.y+yf3*N.z))
+    + gcoef*(dnScalarNormalVec(eta,uf1,uf2,uf3)
+                  + Hmean*eta*(uf1*N.x+uf2*N.y+uf3*N.z))
+    - gcoef*(-kp*grad(phi)'*grad(eta)+fp*eta)
+    + divTau(G31,G32,G33)
+    - Hmean*(G31*N.x+G32*N.y+G33*N.z)
+    + coeffBJS*divTau(A41,A42,A43)
+    ) //EOM
+
+// Optimization parameters
+real Gnew = 0.0;
+real Gold = 0.0;
+real step = 0.0001;
+real temp;
+int iter;
+int maxIter =400;  // Prescribed maximum reported in Sec. 4.3.2
+
+// Lagrange multiplier
+real lagrange = 0.0;
+
+// Volume constraints
+real volume; 
+volume=int3d(Thf)(1.0);
+real VolTarg = 1.5*int3d(Thf)(1.0);
+real beta1 = 2500;  // augmented-Lagrangian penalty, Sec. 4.3.2
+real beta2 = 15;    // Uzawa multiplier step, Sec. 4.3.2
+
+bool saveFirstStep = true;
+// ============================================================
+// Quantitative data variables only, no algorithm change
+// ============================================================
+real timeStart = clock();
+real initialStep = step;
+
+real Jinit = 0.0;
+real Jfinal = 0.0;
+real Jreduction = 0.0;
+
+real Ginit = 0.0;
+real Gfinal = 0.0;
+real Greduction = 0.0;
+
+real VolInit = int3d(Thf)(1.0);
+real VolFinal = 0.0;
+real VolError = 0.0;
+real VolErrorRel = 0.0;
+
+real cpuTime = 0.0;
+
+int Niter = 0;
+int convFlag = 0;
+
+int NeFluid = 0;
+int NePorous = 0;
+int NvFluid = 0;
+int NvPorous = 0;
+
+real gradNormFinal = 0.0;
+real lastStep = step;
+
+// ============================================================
+// Initial solve for quantitative data only
+// This does not change the optimization algorithm.
+// ============================================================
+solve StokesDarcyInit(<[uf1],[uf2],[uf3],[p],[phi]>, <[vf1],[vf2],[vf3],[q],[psi]>)
+    = int3d(Thf)( 2*mu*(bilin1(uf1,uf2,uf3,vf1,vf2,vf3)))  
+    + int3d(Thp)(kp*gcoef*grad(phi)'*grad(psi))            
+    - int3d(Thf)(p*div(vf1,vf2,vf3))                       
+    - int3d(Thf)(q*div(uf1,uf2,uf3))                       
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(uf1,uf2,uf3)'*Ptau(vf1,vf2,vf3)))  
+    + int2d(Thf,7,qft=qf5pT)(gcoef*(phi*(vf1*N.x+vf2*N.y+vf3*N.z)))            
+    - int2d(Thf,7,qft=qf5pT)(gcoef*((uf1*N.x+uf2*N.y+uf3*N.z)*psi))            
+    + int3d(Thf)(p*q*1e-8)                                          
+    - int3d(Thf)(fx*vf1 + fy*vf2 + fz*vf3)                         
+    - int3d(Thp)(gcoef*fp*psi)                                    
+    + on(3,uf1=u01,uf2=u02,uf3=u03) 
+    + on(5,phi=0);
+
+real pVolInit = int3d(Thf)(p) / int3d(Thf)(1.0);
+p = p - pVolInit;
+
+Jinit = int3d(Thf)(2*mu*(bilin1(uf1,uf2,uf3,uf1,uf2,uf3)));
+Ginit = Jinit + lagrange*(VolInit - VolTarg)
+              + 0.5*beta1*(VolInit - VolTarg)^2;
+Gnew = Ginit;
+Gold = Ginit;
+
+cout << "Initial Jinit = " << Jinit << endl;
+cout << "Initial Ginit = " << Ginit << endl;
+cout << "Initial fluid volume = " << VolInit << endl;
+
+
+// Main optimization loop
+for(iter = 1; iter <= maxIter; iter++)
+{	
+    cout << "Iteration " << iter << " ----" << endl;
+    
+// Solve Stokes-Darcy coupled system
+solve StokesDarcy(<[uf1],[uf2],[uf3],[p],[phi]>, <[vf1],[vf2],[vf3],[q],[psi]>)
+    = int3d(Thf)( 2*mu*(bilin1(uf1,uf2,uf3,vf1,vf2,vf3)))  
+    + int3d(Thp)(kp*gcoef*grad(phi)'*grad(psi))            
+    - int3d(Thf)(p*div(vf1,vf2,vf3))                       
+    - int3d(Thf)(q*div(uf1,uf2,uf3))                       
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(uf1,uf2,uf3)'*Ptau(vf1,vf2,vf3)))  
+    + int2d(Thf,7,qft=qf5pT)(gcoef*(phi*(vf1*N.x+vf2*N.y+vf3*N.z)))            
+    - int2d(Thf,7,qft=qf5pT)(gcoef*((uf1*N.x+uf2*N.y+uf3*N.z)*psi))            
+    + int3d(Thf)(p*q*1e-8)                                          
+    - int3d(Thf)(fx*vf1 + fy*vf2 + fz*vf3)                         
+    - int3d(Thp) (gcoef*fp*psi)                                    
+    + on(3,uf1=u01,uf2=u02,uf3=u03) 
+    + on(5,phi=0);    
+
+// Pressure normalization (remove mean pressure)
+real pVol = int3d(Thf)(p) / int3d(Thf)(1.0);
+        p = p - pVol;
+
+velocityMagnitude = sqrt(uf1^2 + uf2^2 + uf3^2);
+
+if (iter == 1 || iter % 10 == 0) {
+    string iterStr = iter;
+
+    // Save velocity field data (Thf region) with mesh connectivity
+    {
+    ofstream file("uf_iter"+iterStr+".dat");
+    file << "TITLE = \"Velocity Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"U\", \"V\", \"W\", \"VelocityMagnitude\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Thf.nv 
+         << ", ELEMENTS=" << Thf.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: mu=" << mu << endl;
+    
+    // Write nodal data for fluid domain
+    for (int i = 0; i < Thf.nv; i++) {
+        real x = Thf(i).x;
+        real y = Thf(i).y;
+        real z = Thf(i).z;
+        real u = uf1(x, y, z);
+        real v = uf2(x, y, z);
+        real w = uf3(x, y, z);
+        real velMag = sqrt(u^2 + v^2 + w^2);
+        file << x << " " << y << " " << z << " " << u << " " << v << " " << w << " " << velMag << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thf.nt; i++) {
+        file << Thf[i][0]+1 << " " << Thf[i][1]+1 << " " << Thf[i][2]+1 << " " << Thf[i][3]+1 << endl;
+    }
+ }
+
+ // Save pressure field data (Thf region) with mesh connectivity
+    {
+    ofstream file("p_iter"+iterStr+".dat");
+    file << "TITLE = \"Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"Pressure\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Thf.nv 
+         << ", ELEMENTS=" << Thf.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: mu=" << mu << endl;
+    
+    // Write nodal data for fluid domain
+    for (int i = 0; i < Thf.nv; i++) {
+        real x = Thf(i).x;
+        real y = Thf(i).y;
+        real z = Thf(i).z;
+        real pressure = p(x, y, z);
+        file << x << " " << y << " " << z << " " << pressure << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thf.nt; i++) {
+        file << Thf[i][0]+1 << " " << Thf[i][1]+1 << " " << Thf[i][2]+1 << " " << Thf[i][3]+1 << endl;
+    }
+ }
+
+    
+ // Save Darcy pressure field data (Thp region) with mesh connectivity
+    {
+    ofstream file("phi_iter"+iterStr+".dat");
+    file << "TITLE = \"Darcy Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"Phi\"" << endl;
+    file << "ZONE T=\"Porous Domain (Darcy Region)\", NODES=" << Thp.nv 
+         << ", ELEMENTS=" << Thp.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: kp=" << kp << endl;
+    
+    // Write nodal data for Darcy domain
+    for (int i = 0; i < Thp.nv; i++) {
+        real x = Thp(i).x;
+        real y = Thp(i).y;
+        real z = Thp(i).z;
+        real phival = phi(x, y, z);
+        file << x << " " << y << " " << z << " " << phival << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thp.nt; i++) {
+        file << Thp[i][0]+1 << " " << Thp[i][1]+1 << " " << Thp[i][2]+1 << " " << Thp[i][3]+1 << endl;
+    }
+ }
+    
+   // ================== Save Stokes mesh (DAT) ==================
+ {
+    ofstream file("mesh_Stokes_iter"+iterStr+".dat");
+    file << "TITLE = \"Stokes Mesh - Iteration " << iterStr << "\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\"" << endl;
+    file << "ZONE T=\"Stokes Domain\", NODES=" << Thf.nv
+         << ", ELEMENTS=" << Thf.nt
+         << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+
+    // ---- Nodes ----
+    for (int i = 0; i < Thf.nv; i++)
+    {
+        file << Thf(i).x << " "
+             << Thf(i).y << " "
+             << Thf(i).z << endl;
+    }
+
+    // ---- Elements ----
+    for (int k = 0; k < Thf.nt; k++)
+    {
+        file << Thf[k][0] + 1 << " "
+             << Thf[k][1] + 1 << " "
+             << Thf[k][2] + 1 << " "
+             << Thf[k][3] + 1 << endl;
+    }
+ }
+
+
+ // ================== Save Darcy mesh (DAT) ==================
+ {
+    ofstream file("mesh_Darcy_iter"+iterStr+".dat");
+    file << "TITLE = \"Darcy Mesh - Iteration " << iterStr << "\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\"" << endl;
+    file << "ZONE T=\"Darcy Domain\", NODES=" << Thp.nv
+         << ", ELEMENTS=" << Thp.nt
+         << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+
+    // ---- Nodes ----
+    for (int i = 0; i < Thp.nv; i++)
+    {
+        file << Thp(i).x << " "
+             << Thp(i).y << " "
+             << Thp(i).z << endl;
+    }
+
+    // ---- Elements ----
+    for (int k = 0; k < Thp.nt; k++)
+    {
+        file << Thp[k][0] + 1 << " "
+             << Thp[k][1] + 1 << " "
+             << Thp[k][2] + 1 << " "
+             << Thp[k][3] + 1 << endl;
+    }
+ }
+
+}
+
+// Solve adjoint system
+solve Adjoint(<[yf1],[yf2],[yf3],[r],[eta]>, <[xf1],[xf2],[xf3],[e],[xi]>)
+    = int3d(Thf)( 2*mu*(bilin1(yf1,yf2,yf3,xf1,xf2,xf3)))
+    + int3d(Thp)(kp*gcoef*grad(eta)'*grad(xi))
+    - int3d(Thf)(r*div(xf1,xf2,xf3))
+    - int3d(Thf)(e*div(yf1,yf2,yf3))
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(yf1,yf2,yf3)'*Ptau(xf1,xf2,xf3)))
+    - int2d(Thf,7,qft=qf5pT)(gcoef*(eta*(xf1*N.x+xf2*N.y+xf3*N.z)))
+    + int2d(Thf,7,qft=qf5pT)(gcoef*((yf1*N.x+yf2*N.y+yf3*N.z)*xi))
+    + int3d(Thf)(r*e*1e-8)  
+    - int3d(Thf)(4*mu*(bilin1(uf1,uf2,uf3,xf1,xf2,xf3)))
+    + on(3,yf1=0,yf2=0,yf3=0) + on(5,eta=0);
+
+// Update current volume before evaluating the augmented objective.
+    volume=int3d(Thf)(1.0);
+    Gnew = int3d(Thf)(2*mu*(bilin1(uf1,uf2,uf3,uf1,uf2,uf3)))
+         + lagrange*(volume - VolTarg)+0.5*beta1*(volume - VolTarg)^2;
+    ofstream obj("objective.txt",append);
+    obj<<Gnew<<endl;
+    cout <<"The value of the augmented functional: "<<Gnew<<endl;
+
+// Relative augmented-objective stopping rule from Algorithm 1.
+    if(iter > 1) {
+        temp = abs(Gnew-Gold)/max(abs(Gold),1.0e-30);
+        if(temp < tol && iter > 10) {
+            convFlag = 1;
+            Niter = iter;
+            cout << "Converged after " << iter << " iterations" << endl;
+            break;
+        }
+    }
+    Gold = Gnew;
+
+// Monitor the volume error.  The multiplier itself is updated only after
+// the H1 descent direction has been computed, in the order of Algorithm 1.
+    real VolErr = (VolTarg-volume);
+    ofstream ve("volerr.txt",append);
+    ve<<VolErr<<endl;
+    cout<<"Volume Error: "<<VolErr<<endl;
+
+
+// L2 project the oriented face normals to continuous surface P1, normalize
+// nodally, and use H_h=div_Gamma(n_h), as described in the 3D discretization.
+Gammah = extract(Thf,label=interfaceLabels);
+for (int k=0;k<Gammah.nt;k++) {
+    int i0=Gammah[k][0], i1=Gammah[k][1], i2=Gammah[k][2];
+    real ax=Gammah(i1).x-Gammah(i0).x;
+    real ay=Gammah(i1).y-Gammah(i0).y;
+    real az=Gammah(i1).z-Gammah(i0).z;
+    real bx=Gammah(i2).x-Gammah(i0).x;
+    real by=Gammah(i2).y-Gammah(i0).y;
+    real bz=Gammah(i2).z-Gammah(i0).z;
+    real cx=ay*bz-az*by;
+    real cy=az*bx-ax*bz;
+    real cz=ax*by-ay*bx;
+    real cn=sqrt(cx*cx+cy*cy+cz*cz);
+    N01[][k]=cx/cn;
+    N02[][k]=cy/cn;
+    N03[][k]=cz/cn;
+}
+
+// Align meshS orientation with the outward normal of the Stokes region.
+real normalAlignment = int2d(Thf,7,qft=qf5pT)(N.x*N01+N.y*N02+N.z*N03);
+real normalSign = 1.0;
+if (normalAlignment < 0.0) normalSign = -1.0;
+N01 = normalSign*N01;
+N02 = normalSign*N02;
+N03 = normalSign*N03;
+
+solve RecoverNormal1(N1,W1)
+    = int2d(Gammah,qft=qf5pT)(N1*W1)
+    - int2d(Gammah,qft=qf5pT)(N01*W1);
+solve RecoverNormal2(N2,W2)
+    = int2d(Gammah,qft=qf5pT)(N2*W2)
+    - int2d(Gammah,qft=qf5pT)(N02*W2);
+solve RecoverNormal3(N3,W3)
+    = int2d(Gammah,qft=qf5pT)(N3*W3)
+    - int2d(Gammah,qft=qf5pT)(N03*W3);
+normN = sqrt(N1*N1+N2*N2+N3*N3);
+N1 = N1/max(normN,1e-12);
+N2 = N2/max(normN,1e-12);
+N3 = N3/max(normN,1e-12);
+Hmean = dx(N1)+dy(N2)+dz(N3);
+
+// Surface-P1 reconstruction of G3 = g(eta*u-phi*y).  The L2 projection
+// provides a single continuous nodal field from traces of the two volume
+// finite-element solutions on the conforming interface.
+solve ProjectG31(G31,W1)
+    = int2d(Gammah,qft=qf5pT)(G31*W1)
+    - int2d(Gammah,qft=qf5pT)(gcoef*(eta*uf1-phi*yf1)*W1);
+solve ProjectG32(G32,W2)
+    = int2d(Gammah,qft=qf5pT)(G32*W2)
+    - int2d(Gammah,qft=qf5pT)(gcoef*(eta*uf2-phi*yf2)*W2);
+solve ProjectG33(G33,W3)
+    = int2d(Gammah,qft=qf5pT)(G33*W3)
+    - int2d(Gammah,qft=qf5pT)(gcoef*(eta*uf3-phi*yf3)*W3);
+
+// Let A4=(u.n)P_tau(y)+(y.n)P_tau(u), so G4=gamma*div_Gamma(A4).
+// N0 is the oriented piecewise-constant face normal required by Sec. 3.1.
+// Project the facewise vector A4 into continuous surface P1 before taking
+// its facewise surface divergence.
+solve ProjectA41(A41,W1)
+    = int2d(Gammah,qft=qf5pT)(A41*W1)
+    - int2d(Gammah,qft=qf5pT)(
+        ((uf1*N01+uf2*N02+uf3*N03)
+            *(yf1-(yf1*N01+yf2*N02+yf3*N03)*N01)
+       +(yf1*N01+yf2*N02+yf3*N03)
+            *(uf1-(uf1*N01+uf2*N02+uf3*N03)*N01))*W1);
+solve ProjectA42(A42,W2)
+    = int2d(Gammah,qft=qf5pT)(A42*W2)
+    - int2d(Gammah,qft=qf5pT)(
+        ((uf1*N01+uf2*N02+uf3*N03)
+            *(yf2-(yf1*N01+yf2*N02+yf3*N03)*N02)
+       +(yf1*N01+yf2*N02+yf3*N03)
+            *(uf2-(uf1*N01+uf2*N02+uf3*N03)*N02))*W2);
+solve ProjectA43(A43,W3)
+    = int2d(Gammah,qft=qf5pT)(A43*W3)
+    - int2d(Gammah,qft=qf5pT)(
+        ((uf1*N01+uf2*N02+uf3*N03)
+            *(yf3-(yf1*N01+yf2*N02+yf3*N03)*N03)
+       +(yf1*N01+yf2*N02+yf3*N03)
+            *(uf3-(uf1*N01+uf2*N02+uf3*N03)*N03))*W3);
+
+// H1 Riesz representative of the complete interface derivative plus the
+// augmented volume constraint.  The positive RHS sign makes d a descent
+// direction because FreeFEM solves A(d,theta)+dJ(theta)=0.
+solve H1Extension(<[d1],[d2],[d3]>,<[theta1],[theta2],[theta3]>)
+    = int3d(Th)(bilin2(d1,d2,d3,theta1,theta2,theta3)+d1*theta1+d2*theta2+d3*theta3)
+    + int2d(Thf,7,qft=qf5pT)(Gdensity(0)*(theta1*N.x+theta2*N.y+theta3*N.z))
+    + int2d(Thf,7,qft=qf5pT)((theta1*N.x+theta2*N.y+theta3*N.z)
+                      *(lagrange+beta1*(volume-VolTarg)))
+    + on(3,4,5,6,d1=0,d2=0,d3=0);
+
+
+// Compute gradient norm
+    real gradNorm = sqrt(int3d(Th)(d1^2 + d2^2 + d3^2));
+gradNormFinal = gradNorm;
+Niter = iter;
+lastStep = step;
+cout << "Gradient norm = " << gradNorm << endl;
+
+// Algorithm 1, Step 4: Uzawa update after solving the H1-gradient flow.
+    lagrange=lagrange+beta2*(volume-VolTarg);
+    cout<<"lagrange: "<<lagrange<<endl;
+
+// Mesh deformation
+    fespace Wh1P1(Thf, P1);
+    fespace Wh2P1(Thp, P1);
+    
+    Wh1P1 d1fP1, d2fP1, d3fP1;
+    Wh2P1 d1pP1, d2pP1, d3pP1;
+    
+    d1fP1 = d1;
+    d2fP1 = d2;
+    d3fP1 = d3;
+    d1pP1 = d1;
+    d2pP1 = d2;
+    d3pP1 = d3;
+
+    mesh3 Thfnew = movemesh(Thf, [x + step * d1fP1, y + step * d2fP1, z + step * d3fP1]);
+    mesh3 Thpnew = movemesh(Thp, [x + step * d1pP1, y + step * d2pP1, z + step * d3pP1]);
+    
+    Th = Thfnew + Thpnew;
+    Thf = Thfnew;
+    Thp = Thpnew;
+    
+plot([uf1,uf2,uf3], wait=0, cmm="Optimized Th mesh iteration: " + iter );
+}
+
+///// END OF THE OPTIMIZATION LOOP /////
+
+// ============================================================
+// Final solve on optimized mesh for quantitative data and final output
+// This only recomputes the state on the final mesh.
+// It does not move the mesh or change the optimization algorithm.
+// ============================================================
+solve StokesDarcyFinal(<[uf1],[uf2],[uf3],[p],[phi]>, <[vf1],[vf2],[vf3],[q],[psi]>)
+    = int3d(Thf)( 2*mu*(bilin1(uf1,uf2,uf3,vf1,vf2,vf3)))  
+    + int3d(Thp)(kp*gcoef*grad(phi)'*grad(psi))            
+    - int3d(Thf)(p*div(vf1,vf2,vf3))                       
+    - int3d(Thf)(q*div(uf1,uf2,uf3))                       
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(uf1,uf2,uf3)'*Ptau(vf1,vf2,vf3)))  
+    + int2d(Thf,7,qft=qf5pT)(gcoef*(phi*(vf1*N.x+vf2*N.y+vf3*N.z)))            
+    - int2d(Thf,7,qft=qf5pT)(gcoef*((uf1*N.x+uf2*N.y+uf3*N.z)*psi))            
+    + int3d(Thf)(p*q*1e-8)                                          
+    - int3d(Thf)(fx*vf1 + fy*vf2 + fz*vf3)                         
+    - int3d(Thp)(gcoef*fp*psi)                                    
+    + on(3,uf1=u01,uf2=u02,uf3=u03) 
+    + on(5,phi=0);
+
+real pVolFinal = int3d(Thf)(p) / int3d(Thf)(1.0);
+p = p - pVolFinal;
+
+// ============================================================
+// Final quantitative data
+// ============================================================
+VolFinal = int3d(Thf)(1.0);
+VolError = VolTarg - VolFinal;
+VolErrorRel = abs(VolError) / max(abs(VolTarg), 1e-30);
+
+Jfinal = int3d(Thf)(2*mu*(bilin1(uf1,uf2,uf3,uf1,uf2,uf3)));
+Gfinal = Jfinal + lagrange*(VolFinal - VolTarg)
+                + 0.5*beta1*(VolFinal - VolTarg)^2;
+
+real epsRed = 1e-30;
+Jreduction = (Jinit - Jfinal) / max(abs(Jinit), epsRed);
+Greduction = (Ginit - Gfinal) / max(abs(Ginit), epsRed);
+
+NeFluid = Thf.nt;
+NePorous = Thp.nt;
+NvFluid = Thf.nv;
+NvPorous = Thp.nv;
+
+cpuTime = clock() - timeStart;
+
+
+velocityMagnitude = sqrt(uf1^2 + uf2^2 + uf3^2);
+
+// Save data for Tecplot visualization
+{
+    // Save fluid velocity field data
+    ofstream file(caption3 + "_uf.dat");
+    file << "TITLE = \"Velocity Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"U\", \"V\", \"W\", \"VelocityMagnitude\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Thf.nv 
+         << ", ELEMENTS=" << Thf.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: mu=" << mu << endl;
+    
+    // Write nodal data for fluid domain
+    for (int i = 0; i < Thf.nv; i++) {
+        real x = Thf(i).x;
+        real y = Thf(i).y;
+        real z = Thf(i).z;
+        real u = uf1(x, y, z);
+        real v = uf2(x, y, z);
+        real w = uf3(x, y, z);
+        real velMag = sqrt(u^2 + v^2 + w^2);
+        file << x << " " << y << " " << z << " " << u << " " << v << " " << w << " " << velMag << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thf.nt; i++) {
+        file << Thf[i][0]+1 << " " << Thf[i][1]+1 << " " << Thf[i][2]+1 << " " << Thf[i][3]+1 << endl;
+    }
+}
+
+{
+    // Save fluid pressure field data
+    ofstream file(caption3 + "_p.dat");
+    file << "TITLE = \"Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"Pressure\"" << endl;
+    file << "ZONE T=\"Fluid Domain (Stokes Region)\", NODES=" << Thf.nv 
+         << ", ELEMENTS=" << Thf.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: mu=" << mu << endl;
+    
+    // Write nodal data for fluid domain
+    for (int i = 0; i < Thf.nv; i++) {
+        real x = Thf(i).x;
+        real y = Thf(i).y;
+        real z = Thf(i).z;
+        real pressure = p(x, y, z);
+        file << x << " " << y << " " << z << " " << pressure << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thf.nt; i++) {
+        file << Thf[i][0]+1 << " " << Thf[i][1]+1 << " " << Thf[i][2]+1 << " " << Thf[i][3]+1 << endl;
+    }
+}
+
+{
+    // Save Darcy pressure field data
+    ofstream file(caption3 + "_phi.dat");
+    file << "TITLE = \"Darcy Pressure Field\"" << endl;
+    file << "VARIABLES = \"X\", \"Y\", \"Z\", \"Phi\"" << endl;
+    file << "ZONE T=\"Porous Domain (Darcy Region)\", NODES=" << Thp.nv 
+         << ", ELEMENTS=" << Thp.nt << ", DATAPACKING=POINT, ZONETYPE=FETETRAHEDRON" << endl;
+    file << "# Physical Parameters: kp=" << kp << endl;
+    
+    // Write nodal data for Darcy domain
+    for (int i = 0; i < Thp.nv; i++) {
+        real x = Thp(i).x;
+        real y = Thp(i).y;
+        real z = Thp(i).z;
+        real phival = phi(x, y, z);
+        file << x << " " << y << " " << z << " " << phival << endl;
+    }
+    
+    // Write connectivity for tetrahedra
+    for (int i = 0; i < Thp.nt; i++) {
+        file << Thp[i][0]+1 << " " << Thp[i][1]+1 << " " << Thp[i][2]+1 << " " << Thp[i][3]+1 << endl;
+    }
+}
+
+
+// ============================================================
+// Save final full mesh and solution in VTK format
+// ============================================================
+savevtk("finalmesh_diffuser3D.vtu", Th, dataname="FinalMeshDiffuser3D");
+
+string outputFile3D = caption3 + "_Solution.vtu";
+savevtk(outputFile3D, Th, [uf1, uf2, uf3], p, phi,
+        dataname="Velocity Pressure DarcyPotential");
+
+// ============================================================
+// Write quantitative data to file
+// ============================================================
+ofstream qout("quantitative_diffuser3D_kp001.txt");
+
+qout << "Quantitative results for 3D Stokes-Darcy optimization" << endl;
+qout << endl;
+
+qout << "case" << endl;
+qout << caption3 << endl;
+qout << endl;
+
+qout << "physical parameters" << endl;
+qout << "mu " << mu << endl;
+qout << "kp " << kp << endl;
+qout << "gcoef " << gcoef << endl;
+qout << "alphaBJS " << alphaBJS << endl;
+qout << "coeffBJS " << coeffBJS << endl;
+qout << endl;
+
+qout << "algorithmic parameters" << endl;
+qout << "tol " << tol << endl;
+qout << "maxIter " << maxIter << endl;
+qout << "beta1 " << beta1 << endl;
+qout << "beta2 " << beta2 << endl;
+qout << "initialStep " << initialStep << endl;
+qout << "lastStep " << lastStep << endl;
+qout << "convFlag " << convFlag << endl;
+qout << endl;
+
+qout << "volume data" << endl;
+qout << "VolInit " << VolInit << endl;
+qout << "VolTarg " << VolTarg << endl;
+qout << "VolFinal " << VolFinal << endl;
+qout << "VolError " << VolError << endl;
+qout << "VolErrorRel " << VolErrorRel << endl;
+qout << endl;
+
+qout << "optimization results" << endl;
+qout << "Jinit " << Jinit << endl;
+qout << "Jfinal " << Jfinal << endl;
+qout << "Jreduction " << Jreduction << endl;
+qout << "Ginit " << Ginit << endl;
+qout << "Gfinal " << Gfinal << endl;
+qout << "Greduction " << Greduction << endl;
+qout << "Niter " << Niter << endl;
+qout << "NeFluid " << NeFluid << endl;
+qout << "NePorous " << NePorous << endl;
+qout << "NvFluid " << NvFluid << endl;
+qout << "NvPorous " << NvPorous << endl;
+qout << "cpuTime " << cpuTime << endl;
+qout << "gradNormFinal " << gradNormFinal << endl;
+qout << endl;
+
+qout << "latex row: optimization" << endl;
+qout << caption3 << " & "
+      << Jinit << " & "
+      << Jfinal << " & "
+      << Jreduction << " & "
+      << Ginit << " & "
+      << Gfinal << " & "
+      << Greduction << " & "
+      << VolErrorRel << " & "
+      << Niter << " & "
+      << "(" << NeFluid << "," << NePorous << ")" << " & "
+      << "(" << NvFluid << "," << NvPorous << ")" << " & "
+      << cpuTime << " \\\\" << endl;
+
+qout << endl;
+
+cout << endl;
+cout << "========================================" << endl;
+cout << "QUANTITATIVE RESULTS 3D" << endl;
+cout << "========================================" << endl;
+cout << "Jinit raw dissipation       = " << Jinit << endl;
+cout << "Jfinal raw dissipation      = " << Jfinal << endl;
+cout << "Jreduction                  = " << Jreduction << endl;
+cout << "Ginit augmented Lagrangian  = " << Ginit << endl;
+cout << "Gfinal augmented Lagrangian = " << Gfinal << endl;
+cout << "Greduction                  = " << Greduction << endl;
+cout << "VolInit                     = " << VolInit << endl;
+cout << "VolTarg                     = " << VolTarg << endl;
+cout << "VolFinal                    = " << VolFinal << endl;
+cout << "VolError                    = " << VolError << endl;
+cout << "VolErrorRel                 = " << VolErrorRel << endl;
+cout << "Niter                       = " << Niter << endl;
+cout << "convFlag                    = " << convFlag << endl;
+cout << "Fluid elements              = " << NeFluid << endl;
+cout << "Porous elements             = " << NePorous << endl;
+cout << "Fluid vertices              = " << NvFluid << endl;
+cout << "Porous vertices             = " << NvPorous << endl;
+cout << "cpuTime                     = " << cpuTime << " s" << endl;
+cout << "gradNormFinal               = " << gradNormFinal << endl;
+cout << "========================================" << endl;
+cout << "Data written to quantitative_diffuser3D_kp001.txt" << endl;
+

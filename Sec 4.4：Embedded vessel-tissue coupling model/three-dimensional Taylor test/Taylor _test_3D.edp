@@ -1,0 +1,367 @@
+// =====================================================================//
+//  TaylorTest3D.edp
+//  3D Taylor test for the shape derivative - Example 4 (Sec. 4.4.2)
+//  Reference: StokesDarcy ShapeOpt Example4 3D (Zhou, Li, Li, Zhu 2026)
+//
+//  PROTOCOL: identical to the 2D test in Sec. 4.1.2.
+//  On a fixed-connectivity mesh, the spatial/geometric discretization is
+//  held fixed while the perturbation step delta is reduced.  The reported
+//  range is stopped before the fixed-h error plateau is reached:
+//
+//    eS = | (J(Omegadelta) - J(Omega)) / delta - dS J(Omega; dSh) |
+//
+//  Only the INTERFACE (surface) shape derivative dS is tested.
+//  Expectation: eS ~ O(delta), i.e. eS halves when delta halves.
+
+//  Conv = log(eS[i-1]/eS[i]) / log(delta[i-1]/delta[i])
+// =====================================================================//
+
+load "gmsh";
+
+mesh3 Th  = gmshload3("bloodmesh.msh");   // <-- change mesh here
+mesh3 Thf = trunc(Th, region == 1);        // free-flow (Stokes) region
+mesh3 Thp = trunc(Th, region == 2);        // porous (Darcy) region
+int[int] interfaceLabels = [7];
+meshS Gammah = extract(Thf,label=interfaceLabels);
+
+// ---------------- mesh diagnostics -----------------------------------
+cout << "mesh: bloodmesh.msh" << endl;
+cout << "  total tet = " << Th.nt
+     << ", fluid = " << Thf.nt
+     << ", darcy = " << Thp.nt << endl;
+cout << "  interface area = " << int2d(Thf,7,qft=qf5pT)(1.0) << endl;
+if (Thf.nt < 5000) {
+    cout << "  WARNING: very coarse mesh, use only as smoke test." << endl;
+}
+
+// ---------------- physical parameters (same as optimization) ----------
+real mu       = 0.01;    // viscosity
+real kp       = 0.0001;  // permeability
+real gcoef    = 1.0;     // gravity coefficient
+real alphaBJS = 0.1;     // fundamental Beavers-Joseph constant
+// Eq. (1.7), isotropic K = kp I: gamma = alpha*sqrt(mu*g/kp)
+real coeffBJS = alphaBJS*sqrt(mu*gcoef/kp);
+
+// ---------------- macros (copied from optimization code) --------------
+macro bilin1(u1,u2,u3,v1,v2,v3) (dx(u1)*dx(v1) + dy(u2)*dy(v2) + dz(u3)*dz(v3) +
+    0.5*(dy(u1)+dx(u2))*(dy(v1)+dx(v2)) +
+    0.5*(dz(u1)+dx(u3))*(dz(v1)+dx(v3)) +
+    0.5*(dz(u2)+dy(u3))*(dz(v2)+dy(v3))) //EOM
+
+macro bilin2(u1, u2, u3, v1, v2, v3) (
+    dx(u1)*dx(v1) + dy(u1)*dy(v1) + dz(u1)*dz(v1) +
+    dx(u2)*dx(v2) + dy(u2)*dy(v2) + dz(u2)*dz(v2) +
+    dx(u3)*dx(v3) + dy(u3)*dy(v3) + dz(u3)*dz(v3)) //EOM
+
+macro grad(p) [dx(p),dy(p),dz(p)] //EOM
+macro div(u1,u2,u3) (dx(u1)+dy(u2)+dz(u3)) //EOM
+
+macro Ptau(u1,u2,u3) [u1 - (u1*N.x + u2*N.y + u3*N.z)*N.x,
+                       u2 - (u1*N.x + u2*N.y + u3*N.z)*N.y,
+                       u3 - (u1*N.x + u2*N.y + u3*N.z)*N.z] //EOM
+
+macro PtauDot(u1,u2,u3, v1,v2,v3) (
+    u1*v1 + u2*v2 + u3*v3
+  - (u1*N.x + u2*N.y + u3*N.z)*(v1*N.x + v2*N.y + v3*N.z)
+) //EOM
+
+macro gradN(f) (dx(f)*N.x + dy(f)*N.y + dz(f)*N.z) //EOM
+
+// Facewise surface operators.  N is constant on each planar triangle.
+macro divTau(a1,a2,a3) (
+    div(a1,a2,a3)
+  - N.x*gradN(a1) - N.y*gradN(a2) - N.z*gradN(a3)) //EOM
+
+macro gradTauDot(s,a1,a2,a3) (
+    dx(s)*(a1-(a1*N.x+a2*N.y+a3*N.z)*N.x)
+  + dy(s)*(a2-(a1*N.x+a2*N.y+a3*N.z)*N.y)
+  + dz(s)*(a3-(a1*N.x+a2*N.y+a3*N.z)*N.z)) //EOM
+
+// d_n[(P_tau u).(P_tau y)] with the normal extended constantly
+// in the normal direction.
+macro dnPtauDot(u1,u2,u3,v1,v2,v3) (
+    gradN(u1)*(v1-(v1*N.x+v2*N.y+v3*N.z)*N.x)
+  + gradN(u2)*(v2-(v1*N.x+v2*N.y+v3*N.z)*N.y)
+  + gradN(u3)*(v3-(v1*N.x+v2*N.y+v3*N.z)*N.z)
+  + gradN(v1)*(u1-(u1*N.x+u2*N.y+u3*N.z)*N.x)
+  + gradN(v2)*(u2-(u1*N.x+u2*N.y+u3*N.z)*N.y)
+  + gradN(v3)*(u3-(u1*N.x+u2*N.y+u3*N.z)*N.z)) //EOM
+
+// d_n[s (v.n)], again using d_n n = 0.
+macro dnScalarNormalVec(s,v1,v2,v3) (
+    gradN(s)*(v1*N.x+v2*N.y+v3*N.z)
+  + s*(gradN(v1)*N.x+gradN(v2)*N.y+gradN(v3)*N.z)) //EOM
+
+// grad_Gamma(u.n).P_tau(v), evaluated with the face normal held fixed.
+macro gradUnDotPtauV(u1,u2,u3,v1,v2,v3) (
+    (dx(u1)*N.x+dx(u2)*N.y+dx(u3)*N.z)
+       *(v1-(v1*N.x+v2*N.y+v3*N.z)*N.x)
+  + (dy(u1)*N.x+dy(u2)*N.y+dy(u3)*N.z)
+       *(v2-(v1*N.x+v2*N.y+v3*N.z)*N.y)
+  + (dz(u1)*N.x+dz(u2)*N.y+dz(u3)*N.z)
+       *(v3-(v1*N.x+v2*N.y+v3*N.z)*N.z)) //EOM
+
+// ---------------- boundary data and sources (all zero, as in Ex.4) ----
+func u01 = 0; func u02 = 1.5; func u03 = 0;
+func fx = 0; func fy = 0; func fz = 0; func fp = 0;
+
+// ---------------- finite element spaces ------------------------------
+fespace Vh(Thf, P1b);
+fespace Qh(Thf, P1);
+fespace Wh(Thp, P1);
+fespace Wpf(Th, P1);
+
+Vh uf1,uf2,uf3,vf1,vf2,vf3;
+Qh p,q;
+Wh phi,psi;
+Vh yf1,yf2,yf3,xf1,xf2,xf3;
+Qh r,e;
+Wh eta,xi;
+Wpf d1,d2,d3,theta1,theta2,theta3;
+fespace Sh(Gammah,P1);
+Sh N1,N2,N3,W1,W2,W3,Hmean,normN;
+fespace Sh0(Gammah,P0);
+Sh0 N01,N02,N03;
+
+// =====================================================================
+//  Step 1: state on reference mesh => J(Omega)
+// =====================================================================
+solve StokesDarcy(<[uf1],[uf2],[uf3],[p],[phi]>, <[vf1],[vf2],[vf3],[q],[psi]>)
+    = int3d(Thf)( 2*mu*(bilin1(uf1,uf2,uf3,vf1,vf2,vf3)))
+    + int3d(Thp)(kp*gcoef*grad(phi)'*grad(psi))
+    - int3d(Thf)(p*div(vf1,vf2,vf3))
+    - int3d(Thf)(q*div(uf1,uf2,uf3))
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(uf1,uf2,uf3)'*Ptau(vf1,vf2,vf3)))
+    + int2d(Thf,7,qft=qf5pT)(gcoef*(phi*(vf1*N.x+vf2*N.y+vf3*N.z)))
+    - int2d(Thf,7,qft=qf5pT)(gcoef*((uf1*N.x+uf2*N.y+uf3*N.z)*psi))
+    + int3d(Thf)(p*q*1e-8)
+    - int3d(Thf)(fx*vf1 + fy*vf2 + fz*vf3)
+    - int3d(Thp)(gcoef*fp*psi)
+    + on(3,uf1=u01,uf2=u02,uf3=u03)
+    + on(5,phi=0);
+
+real pVol = int3d(Thf)(p)/int3d(Thf)(1.0);
+p = p - pVol;
+
+real J0 = int3d(Thf)(2*mu*(bilin1(uf1,uf2,uf3,uf1,uf2,uf3)));
+cout << "J(Omega) = " << J0 << endl;
+
+// =====================================================================
+//  Step 2: adjoint state
+// =====================================================================
+solve Adjoint(<[yf1],[yf2],[yf3],[r],[eta]>, <[xf1],[xf2],[xf3],[e],[xi]>)
+    = int3d(Thf)( 2*mu*(bilin1(yf1,yf2,yf3,xf1,xf2,xf3)))
+    + int3d(Thp)(kp*gcoef*grad(eta)'*grad(xi))
+    - int3d(Thf)(r*div(xf1,xf2,xf3))
+    - int3d(Thf)(e*div(yf1,yf2,yf3))
+    + int2d(Thf,7,qft=qf5pT)(coeffBJS*(Ptau(yf1,yf2,yf3)'*Ptau(xf1,xf2,xf3)))
+    - int2d(Thf,7,qft=qf5pT)(gcoef*(eta*(xf1*N.x+xf2*N.y+xf3*N.z)))
+    + int2d(Thf,7,qft=qf5pT)(gcoef*((yf1*N.x+yf2*N.y+yf3*N.z)*xi))
+    + int3d(Thf)(r*e*1e-8)
+    - int3d(Thf)(4*mu*(bilin1(uf1,uf2,uf3,xf1,xf2,xf3)))
+    + on(3,yf1=0,yf2=0,yf3=0) + on(5,eta=0);
+
+// =====================================================================
+//  Step 3: L2 projection of face normals to continuous surface P1,
+//          vertex normalization, then Hmean = div_Gamma(n_h).
+// =====================================================================
+// On a meshS, FreeFEM's N is a boundary co-normal and is zero in an
+// int2d domain integral.  Construct the oriented triangle normal from
+// the vertex ordering instead and store it in surface P0.
+for (int k=0;k<Gammah.nt;k++) {
+    int i0=Gammah[k][0], i1=Gammah[k][1], i2=Gammah[k][2];
+    real ax=Gammah(i1).x-Gammah(i0).x;
+    real ay=Gammah(i1).y-Gammah(i0).y;
+    real az=Gammah(i1).z-Gammah(i0).z;
+    real bx=Gammah(i2).x-Gammah(i0).x;
+    real by=Gammah(i2).y-Gammah(i0).y;
+    real bz=Gammah(i2).z-Gammah(i0).z;
+    real cx=ay*bz-az*by;
+    real cy=az*bx-ax*bz;
+    real cz=ax*by-ay*bx;
+    real cn=sqrt(cx*cx+cy*cy+cz*cz);
+    N01[][k]=cx/cn;
+    N02[][k]=cy/cn;
+    N03[][k]=cz/cn;
+}
+// Align the extracted surface orientation with the outward normal of Thf.
+real normalAlignment = int2d(Thf,7)(N.x*N01+N.y*N02+N.z*N03);
+real normalSign = 1.0;
+if (normalAlignment < 0.0) normalSign = -1.0;
+N01 = normalSign*N01;
+N02 = normalSign*N02;
+N03 = normalSign*N03;
+cout << "normal alignment before correction = " << normalAlignment << endl;
+solve RecoverNormal1(N1,W1)
+    = int2d(Gammah,qft=qf5pT)(N1*W1)
+    - int2d(Gammah,qft=qf5pT)(N01*W1);
+solve RecoverNormal2(N2,W2)
+    = int2d(Gammah,qft=qf5pT)(N2*W2)
+    - int2d(Gammah,qft=qf5pT)(N02*W2);
+solve RecoverNormal3(N3,W3)
+    = int2d(Gammah,qft=qf5pT)(N3*W3)
+    - int2d(Gammah,qft=qf5pT)(N03*W3);
+normN = sqrt(N1*N1+N2*N2+N3*N3);
+N1 = N1/max(normN,1e-12);
+N2 = N2/max(normN,1e-12);
+N3 = N3/max(normN,1e-12);
+Hmean = dx(N1)+dy(N2)+dz(N3);
+
+cout << "Hmean range: [" << Hmean[].min << ", " << Hmean[].max << "]" << endl;
+
+// Complete density from Theorem 2.3:
+//   G = G1 - G2 + div_Gamma(G3) - H G3.n + G4.
+// Direct boundary expressions are used here; in particular, no quantity
+// containing N or a porous-side field is first interpolated into Vh(Thf).
+macro Gdensity(dummy) (
+      (2*mu*bilin1(uf1,uf2,uf3,uf1,uf2,uf3))
+    - (2*mu*bilin1(uf1,uf2,uf3,yf1,yf2,yf3))
+    + p*div(yf1,yf2,yf3)
+    + r*div(uf1,uf2,uf3)
+    + fx*yf1+fy*yf2+fz*yf3
+    - coeffBJS*(dnPtauDot(uf1,uf2,uf3,yf1,yf2,yf3)
+                  + Hmean*PtauDot(uf1,uf2,uf3,yf1,yf2,yf3))
+    - gcoef*(dnScalarNormalVec(phi,yf1,yf2,yf3)
+                  + Hmean*phi*(yf1*N.x+yf2*N.y+yf3*N.z))
+    + gcoef*(dnScalarNormalVec(eta,uf1,uf2,uf3)
+                  + Hmean*eta*(uf1*N.x+uf2*N.y+uf3*N.z))
+    - gcoef*(-kp*grad(phi)'*grad(eta)+fp*eta)
+    + gcoef*(gradTauDot(eta,uf1,uf2,uf3)
+                  + eta*divTau(uf1,uf2,uf3)
+                  - gradTauDot(phi,yf1,yf2,yf3)
+                  - phi*divTau(yf1,yf2,yf3))
+    - Hmean*gcoef*(eta*(uf1*N.x+uf2*N.y+uf3*N.z)
+                  - phi*(yf1*N.x+yf2*N.y+yf3*N.z))
+    + coeffBJS*(
+          gradUnDotPtauV(uf1,uf2,uf3,yf1,yf2,yf3)
+        + (uf1*N.x+uf2*N.y+uf3*N.z)*divTau(yf1,yf2,yf3)
+        + gradUnDotPtauV(yf1,yf2,yf3,uf1,uf2,uf3)
+        + (yf1*N.x+yf2*N.y+yf3*N.z)*divTau(uf1,uf2,uf3))
+    ) //EOM
+
+// =====================================================================
+//  Step 4: prescribed smooth perturbation field.
+//  A Taylor test does not require the shape-gradient direction.  Using a
+//  smooth field avoids contaminating the test with recovered-curvature
+//  noise on this very coarse fluid mesh.  The polynomial envelope makes
+//  the field vanish on the complete fixed outer boundary.
+// =====================================================================
+d1 = (x-0.5)*x*(1.0-x)*y*(2.0-y)*z*(1.0-z);
+d2 = 0.15*(y-1.0)*x*(1.0-x)*y*(2.0-y)*z*(1.0-z);
+d3 = (z-0.5)*x*(1.0-x)*y*(2.0-y)*z*(1.0-z);
+
+// Normalize so that delta is the maximum component displacement.
+real maxV = max(d1[].linfty, max(d2[].linfty, d3[].linfty));
+cout << "|V|_infty before normalization = " << maxV << endl;
+if (maxV > 1e-30) {
+    d1 = d1/maxV; d2 = d2/maxV; d3 = d3/maxV;
+}
+
+// =====================================================================
+//  Step 5: interface shape derivative  dSJ = int_Gamma G (V.n)
+//          (with per-term diagnostics, printed to screen only)
+// =====================================================================
+real dSJ = int2d(Thf,7,qft=qf5pT)(Gdensity(0)*(d1*N.x+d2*N.y+d3*N.z));
+cout << "alphaBJS = " << alphaBJS << "  gamma = " << coeffBJS << endl;
+cout << "dSJ = " << dSJ << endl;
+
+// =====================================================================
+//  Step 6: Taylor sweep  delta -> 0
+//  eS = | (J(delta)-J(0))/delta - dSJ |   (same definition as 2D)
+//  OUTPUT FILE: same layout as 2D Table 3 (interface column only):
+//    # delta    eS         Conv
+// =====================================================================
+// On bloodmesh the asymptotic-in-delta regime ends near 5e-3; smaller
+// steps are dominated by the fixed spatial/geometric discretization error.
+real[int] deltas = [0.04, 0.02, 0.01, 0.005];
+int nd = deltas.n;
+real[int] Jd(nd), eS(nd), conv(nd);
+
+ofstream out("Taylor_test_3D_results.txt");
+out << "# 3D Taylor test (interface type, same as 2D Sec. 4.1.2)" << endl;
+out << "# mesh = bloodmesh.msh" << endl;
+out << "# fluid tet = " << Thf.nt
+    << ", interface area = " << int2d(Thf,7,qft=qf5pT)(1.0) << endl;
+out << "# J0 = " << J0 << "   dSJ = " << dSJ << endl;
+out << "# delta    eS         Conv" << endl;
+
+fespace Vhf(Thf, P1);
+fespace Vhp(Thp, P1);
+
+for (int i = 0; i < nd; i++) {
+    real delta = deltas[i];
+
+    // ---- deform both sub-meshes with the same P1 displacement ----
+    Vhf d1f = d1; Vhf d2f = d2; Vhf d3f = d3;
+    Vhp d1p = d1; Vhp d2p = d2; Vhp d3p = d3;
+
+    mesh3 ThfN = movemesh(Thf, [x + delta*d1f, y + delta*d2f, z + delta*d3f]);
+    mesh3 ThpN = movemesh(Thp, [x + delta*d1p, y + delta*d2p, z + delta*d3p]);
+
+    // ---- invertibility check (3D movemesh has no checkmovemesh) ----
+    real minVol = 1e30;
+    for (int k = 0; k < ThfN.nt; k++) minVol = min(minVol, ThfN[k].measure);
+    for (int k = 0; k < ThpN.nt; k++) minVol = min(minVol, ThpN[k].measure);
+    cout << "delta = " << delta << " : min element volume = " << minVol << endl;
+    if (minVol <= 0) {
+        cout << "  -> INVERTED MESH, skipped" << endl;
+        Jd[i] = -1; eS[i] = -1; conv[i] = -1;
+        out << delta << "  -1  -1" << endl;
+        continue;
+    }
+
+    // ---- state on perturbed mesh -> J(delta) ----
+    {
+        fespace VN(ThfN, P1b);
+        fespace QN(ThfN, P1);
+        fespace WN(ThpN, P1);
+        VN u1,u2,u3,v1,v2,v3;
+        QN pp,qq;
+        WN ph,ps;
+
+        solve SDN(<[u1],[u2],[u3],[pp],[ph]>, <[v1],[v2],[v3],[qq],[ps]>)
+            = int3d(ThfN)( 2*mu*(bilin1(u1,u2,u3,v1,v2,v3)))
+            + int3d(ThpN)(kp*gcoef*grad(ph)'*grad(ps))
+            - int3d(ThfN)(pp*div(v1,v2,v3))
+            - int3d(ThfN)(qq*div(u1,u2,u3))
+            + int2d(ThfN,7,qft=qf5pT)(coeffBJS*(Ptau(u1,u2,u3)'*Ptau(v1,v2,v3)))
+            + int2d(ThfN,7,qft=qf5pT)(gcoef*(ph*(v1*N.x+v2*N.y+v3*N.z)))
+            - int2d(ThfN,7,qft=qf5pT)(gcoef*((u1*N.x+u2*N.y+u3*N.z)*ps))
+            + int3d(ThfN)(pp*qq*1e-8)
+            - int3d(ThfN)(fx*v1 + fy*v2 + fz*v3)
+            - int3d(ThpN)(gcoef*fp*ps)
+            + on(3,u1=u01,u2=u02,u3=u03)
+            + on(5,ph=0);
+
+        real pv = int3d(ThfN)(pp)/int3d(ThfN)(1.0);
+        pp = pp - pv;
+
+        Jd[i] = int3d(ThfN)(2*mu*(bilin1(u1,u2,u3,u1,u2,u3)));
+        eS[i] = abs((Jd[i] - J0)/delta - dSJ);   // eS, same as 2D
+    }
+
+    // ---- convergence order (relative to previous valid point) ----
+    if (i == 0) {
+        conv[i] = -1;   // first row: no order
+    } else {
+        if (eS[i] > 0 && eS[i-1] > 0) {
+            conv[i] = log(eS[i-1]/eS[i]) / log(deltas[i-1]/deltas[i]);
+        } else {
+            conv[i] = -1;
+        }
+    }
+
+    cout << "delta = " << delta
+         << "  J = " << Jd[i]
+         << "  eS = " << eS[i]
+         << "  Conv = " << conv[i] << endl;
+    if (conv[i] < 0) {
+        out << delta << "  " << eS[i] << "  --" << endl;
+    } else {
+        out << delta << "  " << eS[i] << "  " << conv[i] << endl;
+    }
+}
+// NOTE: no flush(...), no out.close() -- FreeFEM ofstream closes
+// automatically when the script ends (or when it goes out of scope).
+
+cout << "\nDone. Results written to Taylor_test_3D_results.txt" << endl;
