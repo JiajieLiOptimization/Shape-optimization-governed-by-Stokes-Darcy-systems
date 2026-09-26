@@ -5,7 +5,6 @@
 // Implements Example2: L-shaped domain with multiple interfaces.       //
 // Stokes‑Darcy shape optimization to minimize free‑flow energy loss.   //
 // =====================================================================//
-load "iovtk" 
 load "Curvature"
 string caption3="function";
 
@@ -17,7 +16,7 @@ real alphaBJS = 0.01;     // value used to generate the reported fields
 // Eq. (1.7), isotropic K = kp I: gamma = alpha*sqrt(mu*g/kp)
 real coeffBJS = alphaBJS*sqrt(mu*gcoef/kp);
 
-real tol = 1.0e-6;        // Sec. 4 default; this case reaches maxIter=250
+real tol = 1.0e-6;        // Sec. 4 default
 
 
 int n=30;
@@ -135,7 +134,7 @@ real temp;
 real alphaGamma = 30.0;
 
 int iter;
-int maxIter = 250;  // Maximum iterations
+int maxIter = 500;  // Extended so that the revised accepted-step sequence can approach the volume target
 
 //Lagrange multilplier
 real lagrange = 0;
@@ -174,6 +173,17 @@ int NvPorous1 = 0;
 int NvPorous2 = 0;
 real gradNormFinal = 0.0;
 real lastStep = step;
+real armijoSigma = 1.0e-4;
+real backtrackFactor = 0.5;
+real minStep = 1.0e-10;
+real activeAlphaGamma = alphaGamma;
+int directionFallbackCount = 0;
+int rejectedTrialCount = 0;
+int acceptedStepCount = 0;
+real lastDirectionalDerivative = 0.0;
+real lastGtrialFixed = 0.0;
+bool skipStopOnce = false;
+bool forceUnsmoothed = false;
 
 for(iter = 1; iter <= maxIter; iter++)
 {	
@@ -207,10 +217,7 @@ solve StokesDarcy(<[uf1],[uf2],[p],[phi1],[phi2]>, <[vf1],[vf2],[q],[psi1],[psi2
     phi = phi1 + phi2;
 if (iter == 1 || iter % 50 == 0) { 
     string iterStr = iter;
-    plot([uf1,uf2], wait=0, value=true,fill=0, ps="uf_iter"+iterStr+".eps");
-    plot(p, value=true, fill=0, wait=0,ps="p_iter"+iterStr+".eps");
-    plot(phi, value=true, fill=0, wait=0,ps="phi_iter"+iterStr+".eps");
-    plot(Th, wait=0,ps="mesh_iter"+iterStr+".eps");
+    // Headless debug run: interactive/EPS plots are disabled.
 
     // Save velocity field data (Thf region) with mesh connectivity
     {
@@ -305,9 +312,7 @@ if (iter == 1 || iter % 50 == 0) {
     }
   }
 
-  // ================== Save mesh (VTK) ==================
-  string meshvtk = "mesh_iter" + iterStr + ".vtu";
-   savevtk(meshvtk, Th, dataname="Mesh");
+  // VTK output is disabled in the headless debug run.
 
     if (saveFirstStep) {
         saveFirstStep = false;
@@ -350,12 +355,13 @@ solve Adjoint(<[yf1],[yf2],[r],[eta1],[eta2]>, <[xf1],[xf2],[e],[xi1],[xi2]>)
         Gold = Gnew;
     } else {
         temp = abs(Gnew-Gold)/max(abs(Gold),1.0e-30);
-        if(temp < tol) {
+        if((!skipStopOnce) && temp < tol) {
             convFlag = 1;
             Niter = iter;
             cout << "Converged after " << iter << " iterations" << endl;
             break;
         }
+        skipStopOnce = false;
         Gold = Gnew;
     }
 
@@ -373,7 +379,8 @@ solve Adjoint(<[yf1],[yf2],[r],[eta1],[eta2]>, <[xf1],[xf2],[e],[xi1],[xi2]>)
     // real cc = int1d(Th,inter)(1.);
     // real ll = - int1d(Th,inter)(gradientexp)/cc;
     // ==================== EXTENSION PROBLEM WITH VOLUME CONSTRAINT ====================
-    solve H1Extension(<[d1],[d2]>,<[theta1],[theta2]>)
+    activeAlphaGamma = forceUnsmoothed ? 0.0 : alphaGamma;
+    problem H1Extension(<[d1],[d2]>,<[theta1],[theta2]>)
     // = int2d(Th)(0.5*bilin2(d1,d2,theta1,theta2)+d1*theta1+d2*theta2)
     = int2d(Th)(CR*Biholomorphic(d1,d2,theta1,theta2)+symbilin(d1,d2,theta1,theta2)+d1*theta1+d2*theta2)
      + int2d(Thf)(-4*mu*(EuDvDV(uf1, uf2, uf1, uf2, theta1, theta2)))
@@ -407,31 +414,44 @@ solve Adjoint(<[yf1],[yf2],[r],[eta1],[eta2]>, <[xf1],[xf2],[e],[xi1],[xi2]>)
      // ==================== ADD VOLUME CONSTRAINT TERM ====================
      + int2d(Thf)((dx(theta1)+dy(theta2))*(lagrange+beta1*(volume-VolTarg)))
      //===================== ADD PERIMETER REGULARIZATION ==================
-     + int1d(Thf,fluidInt11)(alphaGamma*kappa1*(theta1*N.x+theta2*N.y))
-     + int1d(Thf,fluidInt12)(alphaGamma*kappa2*(theta1*N.x+theta2*N.y))
-     + int1d(Thf,fluidInt21)(alphaGamma*kappa3*(theta1*N.x+theta2*N.y))
-     + int1d(Thf,fluidInt22)(alphaGamma*kappa4*(theta1*N.x+theta2*N.y))
+     + int1d(Thf,fluidInt11)(activeAlphaGamma*kappa1*(theta1*N.x+theta2*N.y))
+     + int1d(Thf,fluidInt12)(activeAlphaGamma*kappa2*(theta1*N.x+theta2*N.y))
+     + int1d(Thf,fluidInt21)(activeAlphaGamma*kappa3*(theta1*N.x+theta2*N.y))
+     + int1d(Thf,fluidInt22)(activeAlphaGamma*kappa4*(theta1*N.x+theta2*N.y))
      + on(1,2,5,8,11,14,15,16,d1=0,d2=0);
+
+    H1Extension;
+
+    // The unregularized fixed-multiplier directional derivative follows
+    // from the Riesz equation: dG[d] = -a(d,d)-alpha*C[d].
+    real rieszNorm2 = int2d(Th)(CR*Biholomorphic(d1,d2,d1,d2)
+                         + symbilin(d1,d2,d1,d2)+d1^2+d2^2);
+    real curvatureDirection = int1d(Thf,fluidInt11)(kappa1*(d1*N.x+d2*N.y))
+                            + int1d(Thf,fluidInt12)(kappa2*(d1*N.x+d2*N.y))
+                            + int1d(Thf,fluidInt21)(kappa3*(d1*N.x+d2*N.y))
+                            + int1d(Thf,fluidInt22)(kappa4*(d1*N.x+d2*N.y));
+    real directionalDerivative = -rieszNorm2-activeAlphaGamma*curvatureDirection;
+
+    // If smoothing destroys descent for the monitored augmented objective,
+    // recompute the direction without curvature smoothing.
+    if(directionalDerivative >= 0.0) {
+        activeAlphaGamma = 0.0;
+        H1Extension;
+        directionFallbackCount = directionFallbackCount + 1;
+        rieszNorm2 = int2d(Th)(CR*Biholomorphic(d1,d2,d1,d2)
+                         + symbilin(d1,d2,d1,d2)+d1^2+d2^2);
+        directionalDerivative = -rieszNorm2;
+    }
+    lastDirectionalDerivative = directionalDerivative;
+    ofstream ddout("directional_derivative.txt",append);
+    ddout << directionalDerivative << " " << activeAlphaGamma << endl;
 
     real gradNorm = sqrt(int2d(Th)(d1^2 + d2^2));
     gradNormFinal = gradNorm;
     cout << "Gradient norm = " << gradNorm << endl;
 
-    // Algorithm 1, Step 4: update the multiplier after computing d_n.
-    lagrange = lagrange + beta2*(volume-VolTarg);
-    cout << "lagrange: " << lagrange << endl;
-
-
-    real minVal = checkmovemesh(Th,[x,y])/1000.;
-    while(1){
-       real mint = checkmovemesh(Th,[x+step*d1,y+step*d2]);
-       if (mint>minVal) break;
-       step=step/2.;   
-    }
-
-    lastStep = step;
-    Niter = iter;
-
+    // Fixed-multiplier Armijo backtracking.  The multiplier lagrange=l_n
+    // is held fixed throughout every trial evaluation.
     fespace WhfP1(Thf, P1);
     fespace Whp1P1(Thp1, P1);
     fespace Whp2P1(Thp2, P1);
@@ -447,17 +467,99 @@ solve Adjoint(<[yf1],[yf2],[r],[eta1],[eta2]>, <[xf1],[xf2],[e],[xi1],[xi2]>)
     d1p2P1 = d1;
     d2p2P1 = d2;
 
-    mesh Thfnew = movemesh(Thf, [x + step * d1fP1, y + step * d2fP1]);
-    mesh Thp1new = movemesh(Thp1, [x + step * d1p1P1, y + step * d2p1P1]);
-    mesh Thp2new = movemesh(Thp2, [x + step * d1p2P1, y + step * d2p2P1]);
-    
-    Th = Thfnew + Thp1new + Thp2new;
-    Thf = Thfnew;
-    Thp1 = Thp1new;
-    Thp2 = Thp2new;
-    Thp = Thp1new + Thp2new;
-    cout<<"step size:"<<step<<endl;
-    plot([uf1,uf2], wait=0, cmm="Optimized Th mesh iteration: " + iter );
+    mesh ThBase = Th;
+    mesh ThfBase = Thf;
+    mesh Thp1Base = Thp1;
+    mesh Thp2Base = Thp2;
+    real minVal = checkmovemesh(ThBase,[x,y])/1000.0;
+    real trialStep = initialStep;
+    bool acceptedTrial = false;
+    bool lineSearchFailed = false;
+    real GtrialFixed = Gnew;
+    real Jtrial = Jcurrent;
+    real VolTrial = volume;
+
+    while(!acceptedTrial) {
+        real mint = checkmovemesh(ThBase,[x+trialStep*d1,y+trialStep*d2]);
+        if(mint <= minVal) {
+            trialStep = trialStep*backtrackFactor;
+            rejectedTrialCount = rejectedTrialCount + 1;
+            if(trialStep < minStep) { lineSearchFailed = true; break; }
+            continue;
+        }
+
+        mesh Thfnew = movemesh(ThfBase,[x+trialStep*d1fP1,y+trialStep*d2fP1]);
+        mesh Thp1new = movemesh(Thp1Base,[x+trialStep*d1p1P1,y+trialStep*d2p1P1]);
+        mesh Thp2new = movemesh(Thp2Base,[x+trialStep*d1p2P1,y+trialStep*d2p2P1]);
+        Thf = Thfnew; Thp1 = Thp1new; Thp2 = Thp2new;
+        Thp = Thp1+Thp2; Th = Thp1+Thf+Thp2;
+
+        solve StokesDarcyTrial(<[uf1],[uf2],[p],[phi1],[phi2]>, <[vf1],[vf2],[q],[psi1],[psi2]>)
+          = int2d(Thf)(2*mu*bilin1(uf1,uf2,vf1,vf2))
+          + int2d(Thp1)(kp*gcoef*grad(phi1)'*grad(psi1)) + int2d(Thp2)(kp*gcoef*grad(phi2)'*grad(psi2))
+          - int2d(Thf)(p*div(vf1,vf2)) - int2d(Thf)(q*div(uf1,uf2))
+          + int1d(Thf,fluidInt11)(coeffBJS*Ptau(uf1,uf2)'*Ptau(vf1,vf2)) + int1d(Thf,fluidInt12)(coeffBJS*Ptau(uf1,uf2)'*Ptau(vf1,vf2))
+          + int1d(Thf,fluidInt21)(coeffBJS*Ptau(uf1,uf2)'*Ptau(vf1,vf2)) + int1d(Thf,fluidInt22)(coeffBJS*Ptau(uf1,uf2)'*Ptau(vf1,vf2))
+          + int1d(Thf,fluidInt11)(gcoef*phi1*(vf1*N.x+vf2*N.y)) + int1d(Thf,fluidInt12)(gcoef*phi1*(vf1*N.x+vf2*N.y))
+          + int1d(Thf,fluidInt21)(gcoef*phi2*(vf1*N.x+vf2*N.y)) + int1d(Thf,fluidInt22)(gcoef*phi2*(vf1*N.x+vf2*N.y))
+          - int1d(Thf,fluidInt11)(gcoef*(uf1*N.x+uf2*N.y)*psi1) - int1d(Thf,fluidInt12)(gcoef*(uf1*N.x+uf2*N.y)*psi1)
+          - int1d(Thf,fluidInt21)(gcoef*(uf1*N.x+uf2*N.y)*psi2) - int1d(Thf,fluidInt22)(gcoef*(uf1*N.x+uf2*N.y)*psi2)
+          + int2d(Thf)(p*q*1e-8) - int2d(Thf)(fx*vf1+fy*vf2)
+          - int2d(Thp1)(gcoef*fp*psi1) - int2d(Thp2)(gcoef*fp*psi2)
+          + on(5,uf1=u01,uf2=u02) + on(1,phi1=0) + on(11,15,16,phi2=0);
+
+        real pVolTrial = int2d(Thf)(p)/int2d(Thf)(1.0);
+        p = p-pVolTrial;
+        Jtrial = int2d(Thf)(2*mu*bilin1(uf1,uf2,uf1,uf2));
+        VolTrial = int2d(Thf)(1.0);
+        GtrialFixed = Jtrial + lagrange*(VolTrial-VolTarg)
+                    + 0.5*beta1*(VolTrial-VolTarg)^2;
+
+        if(GtrialFixed <= Gnew + armijoSigma*trialStep*directionalDerivative) {
+            acceptedTrial = true;
+        } else {
+            Thf = ThfBase; Thp1 = Thp1Base; Thp2 = Thp2Base;
+            Thp = Thp1+Thp2; Th = Thp1+Thf+Thp2;
+            trialStep = trialStep*backtrackFactor;
+            rejectedTrialCount = rejectedTrialCount + 1;
+            if(trialStep < minStep) { lineSearchFailed = true; break; }
+        }
+    }
+
+    if(lineSearchFailed && activeAlphaGamma > 0.0) {
+        Thf = ThfBase; Thp1 = Thp1Base; Thp2 = Thp2Base;
+        Thp = Thp1+Thp2; Th = Thp1+Thf+Thp2;
+        forceUnsmoothed = true;
+        skipStopOnce = true;
+        directionFallbackCount = directionFallbackCount + 1;
+        cout << "Smoothed line search failed at iteration " << iter
+             << "; retrying subsequent iterations without curvature smoothing." << endl;
+        continue;
+    }
+
+    if(lineSearchFailed) {
+        Thf = ThfBase; Thp1 = Thp1Base; Thp2 = Thp2Base;
+        Thp = Thp1+Thp2; Th = Thp1+Thf+Thp2;
+        cout << "Line search failed at iteration " << iter << endl;
+        break;
+    }
+
+    acceptedStepCount = acceptedStepCount + 1;
+    lastGtrialFixed = GtrialFixed;
+    step = trialStep;
+    lastStep = step;
+    Niter = iter;
+    ofstream lsout("line_search_history.txt",append);
+    lsout << iter << " " << Gnew << " " << GtrialFixed << " "
+          << directionalDerivative << " " << step << " "
+          << activeAlphaGamma << " " << Jtrial << " " << VolTrial << endl;
+    ofstream jout("raw_objective.txt",append); jout << Jtrial << endl;
+    ofstream fixedout("fixed_multiplier_objective.txt",append); fixedout << GtrialFixed << endl;
+
+    // Multiplier update occurs only after the fixed-multiplier trial is accepted.
+    lagrange = lagrange + beta2*(volume-VolTarg);
+    cout << "accepted step=" << step << ", Gfixed: " << Gnew << " -> " << GtrialFixed << endl;
+    cout << "lagrange: " << lagrange << endl;
 }
 
 // Recompute the state on the final deformed mesh before reporting J_N and G_N.
@@ -501,10 +603,7 @@ NvPorous1 = Thp1.nv;
 NvPorous2 = Thp2.nv;
 cpuTime = clock() - timeStart;
 
-plot([uf1,uf2], wait=true,value=true,fill=0,ps=caption3+"_uf.eps");
-plot(p,value=true,fill=0,wait=true,ps=caption3+"_p.eps");
-plot(phi,value=true,fill=0,wait=true,ps=caption3+"_phi.eps");
-plot(Th,wait=1,ps="finalmesh.eps");
+// Headless debug run: final interactive/EPS plots are disabled.
 
 // Save final data files with mesh connectivity
 {
@@ -595,10 +694,7 @@ plot(Th,wait=1,ps="finalmesh.eps");
 }
 
 
-// ================== Final mesh (VTK) ==================
-savevtk("finalmesh.vtu", Th, dataname="FinalMesh");
-string outputFile1 = caption3 + "_Solution.vtu";
-savevtk(outputFile1, Th, [uf1, uf2], dataname="StokesDarcySol");
+// VTK output is disabled in the headless Windows debug run.
 
 // ============================================================
 // Write quantitative data to file
@@ -630,6 +726,13 @@ qout << "CR " << CR << endl;
 qout << "initialStep " << initialStep << endl;
 qout << "lastStep " << lastStep << endl;
 qout << "convFlag " << convFlag << endl;
+qout << "armijoSigma " << armijoSigma << endl;
+qout << "backtrackFactor " << backtrackFactor << endl;
+qout << "directionFallbackCount " << directionFallbackCount << endl;
+qout << "rejectedTrialCount " << rejectedTrialCount << endl;
+qout << "acceptedStepCount " << acceptedStepCount << endl;
+qout << "lastDirectionalDerivative " << lastDirectionalDerivative << endl;
+qout << "lastGtrialFixed " << lastGtrialFixed << endl;
 qout << endl;
 
 qout << "volume data" << endl;
