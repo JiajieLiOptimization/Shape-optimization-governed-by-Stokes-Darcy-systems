@@ -1,0 +1,114 @@
+// Two-dimensional Taylor test for Case 4.1.2 (validated final protocol).
+// The same smooth, mesh-independent deformation is used for both formulas;
+// n=50 is required to keep the derivative comparison above the spatial
+// discretization plateau over the reported perturbation range.
+load "Curvature"
+
+real mu=1.0, kp=0.001, gcoef=1.0, alphaBJS=0.1;
+real coeffBJS=alphaBJS*sqrt(mu*gcoef/kp);
+int n=50, fluidInt=6, DarcyInt=4;
+
+macro bilin1(u1,u2,v1,v2) (dx(u1)*dx(v1)+0.5*(dy(u1)+dx(u2))*(dy(v1)+dx(v2))+dy(u2)*dy(v2)) //
+macro grad(p) [dx(p),dy(p)] //
+macro div(u1,u2) (dx(u1)+dy(u2)) //
+macro Ptau(u1,u2) [(u1*N.y-u2*N.x)*N.y,(u1*N.y-u2*N.x)*(-N.x)] //
+macro PtauDot(u1,u2,v1,v2) (u1*v1+u2*v2-(u1*N.x+u2*N.y)*(v1*N.x+v2*N.y)) //
+macro gradN(f) (dx(f)*N.x+dy(f)*N.y) //
+macro divTau(a1,a2) (div(a1,a2)-N.x*gradN(a1)-N.y*gradN(a2)) //
+macro gradTauDot(s,a1,a2) (dx(s)*(a1-(a1*N.x+a2*N.y)*N.x)+dy(s)*(a2-(a1*N.x+a2*N.y)*N.y)) //
+macro dnPtauDot(u1,u2,v1,v2) (gradN(u1)*(v1-(v1*N.x+v2*N.y)*N.x)+gradN(u2)*(v2-(v1*N.x+v2*N.y)*N.y)+gradN(v1)*(u1-(u1*N.x+u2*N.y)*N.x)+gradN(v2)*(u2-(u1*N.x+u2*N.y)*N.y)) //
+macro dnScalarNormalVec(s,v1,v2) (gradN(s)*(v1*N.x+v2*N.y)+s*(gradN(v1)*N.x+gradN(v2)*N.y)) //
+macro gradUnDotPtauV(u1,u2,v1,v2) ((dx(u1)*N.x+dx(u2)*N.y)*(v1-(v1*N.x+v2*N.y)*N.x)+(dy(u1)*N.x+dy(u2)*N.y)*(v2-(v1*N.x+v2*N.y)*N.y)) //
+macro EuDvDV(u1,u2,v1,v2,t1,t2) (dx(u1)*(dx(v1)*dx(t1)+dy(v1)*dx(t2))+0.5*(dy(u1)+dx(u2))*(dx(v1)*dy(t1)+dy(v1)*dy(t2))+0.5*(dx(u2)+dy(u1))*(dx(v2)*dx(t1)+dy(v2)*dx(t2))+dy(u2)*(dx(v2)*dy(t1)+dy(v2)*dy(t2))) //
+macro DuDvT(u1,u2,v1,v2) (dx(u1)*dx(v1)+dy(u1)*dx(v2)+dx(u2)*dy(v1)+dy(u2)*dy(v2)) //
+macro DuTDpDq(u1,u2,p,q) (dx(q)*(dx(u1)*dx(p)+dx(u2)*dy(p))+dy(q)*(dy(u1)*dx(p)+dy(u2)*dy(p))) //
+macro GradDiv(u1,u2) [dx(u1)*N.x+dx(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.x,dy(u1)*N.x+dy(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.y] //
+macro GradDiv2(u1,u2,v1,v2) (v1*(dx(u1)*N.x+dx(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.x)+v2*(dy(u1)*N.x+dy(u2)*N.y-(N.x*(dx(u1)*N.x+dx(u2)*N.y)+N.y*(dy(u1)*N.x+dy(u2)*N.y))*N.y)) //
+macro DVnn(v1,v2) (N.x*(N.x*dx(v1)+N.y*dy(v1))+N.y*(N.x*dx(v2)+N.y*dy(v2))) //
+
+border Cu1(t=1.0,0.35){x=0;y=t;label=5;}
+border Cu2(t=0,2){x=t;y=0.35-0.1*sin(3.5*pi*t);label=fluidInt;}
+border Cu3(t=0.35,1){x=2;y=t;label=7;}
+border Cu4(t=2,0){x=t;y=1;label=8;}
+mesh Th1=buildmesh(Cu1(0.65*n)+Cu2(3.5*n)+Cu3(0.65*n)+Cu4(2*n));
+border Cl1(t=0.35,0){x=0;y=t;label=1;}
+border Cl2(t=0,2){x=t;y=0;label=2;}
+border Cl3(t=0,0.35){x=2;y=t;label=3;}
+border Cl4(t=2,0){x=t;y=0.35-0.1*sin(3.5*pi*t);label=DarcyInt;}
+mesh Th2=buildmesh(Cl1(0.35*n)+Cl2(2*n)+Cl3(0.35*n)+Cl4(3.5*n));
+mesh Th=Th1+Th2;
+
+real inletLength=.65,deltaIn=.10;
+real inletAmp=.2*inletLength/(inletLength-.5*deltaIn);
+func inletS=((1-y)/deltaIn<=0)?0:(((1-y)/deltaIn>=1)?1:(10*((1-y)/deltaIn)^3-15*((1-y)/deltaIn)^4+6*((1-y)/deltaIn)^5));
+func u01=inletAmp*inletS; func u02=0;
+func fx=0; func fy=0; func fp=0;
+func dxfx=0; func dyfx=0; func dxfy=0; func dyfy=0; func dxfp=0; func dyfp=0;
+
+fespace Vh1(Th1,P1b); fespace Wh1(Th1,P1); fespace Wh2(Th2,P1); fespace Wh(Th,P1);
+Vh1 uf1,uf2,vf1,vf2,yf1,yf2,xf1,xf2;
+Wh1 p,q,r,e,kappa=curvature(Th1,fluidInt);
+Wh2 phi,psi,eta,xi;
+Wh d1,d2;
+
+solve State(<[uf1],[uf2],[p],[phi]>,<[vf1],[vf2],[q],[psi]>)
+=int2d(Th1)(2*mu*bilin1(uf1,uf2,vf1,vf2))+int2d(Th2)(kp*gcoef*grad(phi)'*grad(psi))
+-int2d(Th1)(p*div(vf1,vf2))-int2d(Th1)(q*div(uf1,uf2))
++int1d(Th1,fluidInt)(coeffBJS*(Ptau(uf1,uf2)'*Ptau(vf1,vf2)))
++int1d(Th1,fluidInt)(gcoef*phi*(vf1*N.x+vf2*N.y))-int1d(Th1,fluidInt)(gcoef*(uf1*N.x+uf2*N.y)*psi)
++int2d(Th1)(p*q*1e-8)+on(5,uf1=u01,uf2=u02)+on(8,uf1=0,uf2=0)+on(1,2,phi=0);
+p=p-int2d(Th1)(p)/int2d(Th1)(1.0);
+real J0=int2d(Th1)(2*mu*bilin1(uf1,uf2,uf1,uf2));
+
+solve Adjoint(<[yf1],[yf2],[r],[eta]>,<[xf1],[xf2],[e],[xi]>)
+=int2d(Th1)(2*mu*bilin1(yf1,yf2,xf1,xf2))+int2d(Th2)(kp*gcoef*grad(eta)'*grad(xi))
+-int2d(Th1)(r*div(xf1,xf2))-int2d(Th1)(e*div(yf1,yf2))
++int1d(Th1,fluidInt)(coeffBJS*(Ptau(yf1,yf2)'*Ptau(xf1,xf2)))
+-int1d(Th1,fluidInt)(gcoef*eta*(xf1*N.x+xf2*N.y))+int1d(Th1,fluidInt)(gcoef*(yf1*N.x+yf2*N.y)*xi)
++int2d(Th1)(r*e*1e-8)-int2d(Th1)(4*mu*bilin1(uf1,uf2,xf1,xf2))
++on(5,8,yf1=0,yf2=0)+on(1,2,eta=0);
+
+// Smooth field vanishing on every fixed outer boundary; normalize max component to one.
+d1=0.20*(x-1)*x*(2-x)*y*(1-y);
+d2=x*(2-x)*y*(1-y);
+real maxV=max(d1[].linfty,d2[].linfty); d1=d1/maxV; d2=d2/maxV;
+
+real dVJ=
+ int2d(Th1)(-4*mu*EuDvDV(uf1,uf2,uf1,uf2,d1,d2)+2*mu*bilin1(uf1,uf2,uf1,uf2)*div(d1,d2))
++int2d(Th1)(2*mu*EuDvDV(yf1,yf2,uf1,uf2,d1,d2)+2*mu*EuDvDV(uf1,uf2,yf1,yf2,d1,d2)-2*mu*bilin1(uf1,uf2,yf1,yf2)*div(d1,d2))
++int2d(Th1)(yf1*(d1*dxfx+d2*dyfx)+yf2*(d1*dxfy+d2*dyfy)+(fx*yf1+fy*yf2)*div(d1,d2)-DuDvT(yf1,yf2,d1,d2)*p)
++int2d(Th2)(kp*gcoef*(DuTDpDq(d1,d2,phi,eta)+DuTDpDq(d1,d2,eta,phi)-grad(phi)'*grad(eta)*div(d1,d2)))
++int2d(Th2)(gcoef*eta*(dxfp*d1+dyfp*d2+fp*div(d1,d2)))
++int1d(Th1,fluidInt)(gcoef*phi*GradDiv2(d1,d2,yf1,yf2)-gcoef*eta*GradDiv2(d1,d2,uf1,uf2))
+-int1d(Th1,fluidInt)(gcoef*phi*(yf1*N.x+yf2*N.y)*(div(d1,d2)-DVnn(d1,d2)))
++int1d(Th1,fluidInt)(gcoef*eta*(uf1*N.x+uf2*N.y)*(div(d1,d2)-DVnn(d1,d2)))
+-int1d(Th1,fluidInt)(coeffBJS*GradDiv(d1,d2)'*Ptau(yf1,yf2)*(uf1*N.x+uf2*N.y))
+-int1d(Th1,fluidInt)(coeffBJS*GradDiv(d1,d2)'*Ptau(uf1,uf2)*(yf1*N.x+yf2*N.y))
+-int1d(Th1,fluidInt)(coeffBJS*Ptau(uf1,uf2)'*Ptau(yf1,yf2)*(div(d1,d2)-DVnn(d1,d2)))
+-int2d(Th1)(r*DuDvT(uf1,uf2,d1,d2));
+
+macro Gdensity(dummy) (2*mu*bilin1(uf1,uf2,uf1,uf2)-2*mu*bilin1(uf1,uf2,yf1,yf2)+p*div(yf1,yf2)+r*div(uf1,uf2)+fx*yf1+fy*yf2-coeffBJS*(dnPtauDot(uf1,uf2,yf1,yf2)+kappa*PtauDot(uf1,uf2,yf1,yf2))-gcoef*(dnScalarNormalVec(phi,yf1,yf2)+kappa*phi*(yf1*N.x+yf2*N.y))+gcoef*(dnScalarNormalVec(eta,uf1,uf2)+kappa*eta*(uf1*N.x+uf2*N.y))-gcoef*(-kp*grad(phi)'*grad(eta)+fp*eta)+gcoef*(gradTauDot(eta,uf1,uf2)+eta*divTau(uf1,uf2)-gradTauDot(phi,yf1,yf2)-phi*divTau(yf1,yf2))-kappa*gcoef*(eta*(uf1*N.x+uf2*N.y)-phi*(yf1*N.x+yf2*N.y))+coeffBJS*(gradUnDotPtauV(uf1,uf2,yf1,yf2)+(uf1*N.x+uf2*N.y)*divTau(yf1,yf2)+gradUnDotPtauV(yf1,yf2,uf1,uf2)+(yf1*N.x+yf2*N.y)*divTau(uf1,uf2))) //
+real dSJ=int1d(Th1,fluidInt)(Gdensity(0)*(d1*N.x+d2*N.y));
+
+real[int] deltas=[0.20,0.10,0.05,0.025]; int nd=deltas.n;
+real[int] Jd(nd),eV(nd),eS(nd),orderV(nd),orderS(nd);
+ofstream out("Taylor_test_2D_results.txt");
+ofstream outV("Taylor_eV_data.dat"); ofstream outS("Taylor_eS_data.dat");
+out << "# delta Jdelta FD dVJ eV orderV dSJ eS orderS minArea" << endl;
+fespace Vhf(Th1,P1); fespace Vhp(Th2,P1);
+for(int i=0;i<nd;i++){
+ real delta=deltas[i]; Vhf a1=d1,a2=d2; Vhp b1=d1,b2=d2;
+ mesh Th1N=movemesh(Th1,[x+delta*a1,y+delta*a2]); mesh Th2N=movemesh(Th2,[x+delta*b1,y+delta*b2]);
+ real minArea=1e30; for(int k=0;k<Th1N.nt;k++) minArea=min(minArea,Th1N[k].area); for(int k=0;k<Th2N.nt;k++) minArea=min(minArea,Th2N[k].area);
+ { fespace VN(Th1N,P1b); fespace QN(Th1N,P1); fespace WN(Th2N,P1); VN u1,u2,v1,v2; QN pp,qq; WN ph,ps;
+ solve StateN(<[u1],[u2],[pp],[ph]>,<[v1],[v2],[qq],[ps]>)
+ =int2d(Th1N)(2*mu*bilin1(u1,u2,v1,v2))+int2d(Th2N)(kp*gcoef*grad(ph)'*grad(ps))-int2d(Th1N)(pp*div(v1,v2))-int2d(Th1N)(qq*div(u1,u2))
+ +int1d(Th1N,fluidInt)(coeffBJS*(Ptau(u1,u2)'*Ptau(v1,v2)))+int1d(Th1N,fluidInt)(gcoef*ph*(v1*N.x+v2*N.y))-int1d(Th1N,fluidInt)(gcoef*(u1*N.x+u2*N.y)*ps)
+ +int2d(Th1N)(pp*qq*1e-8)+on(5,u1=u01,u2=u02)+on(8,u1=0,u2=0)+on(1,2,ph=0);
+ pp=pp-int2d(Th1N)(pp)/int2d(Th1N)(1.0); Jd[i]=int2d(Th1N)(2*mu*bilin1(u1,u2,u1,u2)); }
+ real FD=(Jd[i]-J0)/delta; eV[i]=abs(FD-dVJ); eS[i]=abs(FD-dSJ);
+ orderV[i]=(i==0)?-1:log(eV[i-1]/eV[i])/log(deltas[i-1]/delta); orderS[i]=(i==0)?-1:log(eS[i-1]/eS[i])/log(deltas[i-1]/delta);
+ out << delta << " " << Jd[i] << " " << FD << " " << dVJ << " " << eV[i] << " " << orderV[i] << " " << dSJ << " " << eS[i] << " " << orderS[i] << " " << minArea << endl;
+ outV << delta << " " << eV[i] << " " << orderV[i] << endl; outS << delta << " " << eS[i] << " " << orderS[i] << endl;
+}
+cout << "J0=" << J0 << " dVJ=" << dVJ << " dSJ=" << dSJ << endl;

@@ -120,7 +120,7 @@ real Gold = 0.0;
 real step = 0.1;
 real temp;
 int iter;
-int maxIter = 250;
+int maxIter = 0;
 
 // Lagrange multiplier
 real lagrange = 0.0;

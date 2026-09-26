@@ -21,7 +21,7 @@ real coeffBJS = alphaBJS*sqrt(mu*gcoef/kp);
 
 real tol=5.0e-4;        // epsilon_obj, Sec. 4 default
 
-int n=20;
+int n=10;
 int fluidInt = 2;
 int DarcyInt = 7;
 
@@ -120,7 +120,7 @@ real Gold = 0.0;
 real step = 0.1;
 real temp;
 int iter;
-int maxIter = 250;
+int maxIter = 0;
 
 // Lagrange multiplier
 real lagrange = 0.0;

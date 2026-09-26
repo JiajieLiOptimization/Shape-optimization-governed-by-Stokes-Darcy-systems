@@ -5,7 +5,6 @@
 // Implements Example1‑Case4.1.2:  curved initial interface.    //
 // Stokes‑Darcy shape optimization to minimize free‑flow energy loss.   //
 // =====================================================================//
-load "iovtk"
 load "Curvature"
 string caption3="function";
 
@@ -63,7 +62,17 @@ mesh Th2 = buildmesh(Cl1(0.35*n)+Cl2(2.0*n)+Cl3(0.35*n)+Cl4(3.5*n));
 mesh Th = Th1+Th2;
 
 // Boundary conditions and source terms
-func u01=0.2;
+// One-sided C2 inlet taper at the inlet/top-wall corner (0,1).
+// The amplitude preserves the original flux 0.2*0.65 = 0.13.
+real inletLength = 0.65;
+real deltaIn = 0.10;
+real inletAmp = 0.2*inletLength/(inletLength-0.5*deltaIn);
+func inletS = ((1.0-y)/deltaIn <= 0.0) ? 0.0
+              : (((1.0-y)/deltaIn >= 1.0) ? 1.0
+              : (10.0*((1.0-y)/deltaIn)^3
+                 -15.0*((1.0-y)/deltaIn)^4
+                 +6.0*((1.0-y)/deltaIn)^5));
+func u01=inletAmp*inletS;
 func u02=0.0;
 func fx = 0;
 func fy = 0;
@@ -198,10 +207,7 @@ for(iter = 1; iter <= maxIter; iter++)
     if (saveFirstStep || iter % 35 == 0) {
         string iterStr = iter;
 
-        plot([uf1,uf2], wait=0, value=true, fill=0, ps="uf_iter"+iterStr+".eps");
-        plot(p, value=true, fill=0, wait=0, ps="p_iter"+iterStr+".eps");
-        plot(phi, value=true, fill=0, wait=0, ps="phi_iter"+iterStr+".eps");
-        plot(Th, wait=0, ps="mesh_iter"+iterStr+".eps");
+        // Headless debug run: intermediate plots are disabled.
 
         {
             ofstream file("uf_iter"+iterStr+".dat");
@@ -375,7 +381,7 @@ for(iter = 1; iter <= maxIter; iter++)
     Th1 = Th1new;
     Th2 = Th2new;
 
-    plot([uf1,uf2], wait=0, cmm="Optimized Th mesh iteration: " + iter );
+    // Headless debug run: interactive plot is disabled.
     if(stopAfterUpdate) {
         Niter = iter + 1;
         cout << "Converged after " << Niter << " iterations" << endl;
@@ -423,10 +429,7 @@ NvPorous = Th2.nv;
 cpuTime = clock() - timeStart;
 
 // Save final EPS plots
-plot([uf1,uf2], wait=true, value=true, fill=0, ps=caption3+"_uf.eps");
-plot(p, value=true, fill=0, wait=true, ps=caption3+"_p.eps");
-plot(phi, value=true, fill=0, wait=true, ps=caption3+"_phi.eps");
-plot(Th, wait=1, ps="finalmesh.eps");
+// Headless debug run: final interactive plots are disabled.
 
 // Save final data files for Tecplot
 {
@@ -491,9 +494,7 @@ plot(Th, wait=1, ps="finalmesh.eps");
     }
 }
 
-// Save VTK file for other post-processing
-string outputFile1 = caption3 + "_Solution.vtu";
-savevtk(outputFile1, Th, [uf1, uf2], p, phi, dataname="Velocity Pressure Potential");
+// VTK output is disabled in the headless Windows debug run.
 
 // ============================================================
 // Write quantitative data to file
@@ -513,6 +514,11 @@ qout << "kp " << kp << endl;
 qout << "gcoef " << gcoef << endl;
 qout << "alphaBJS " << alphaBJS << endl;
 qout << "coeffBJS " << coeffBJS << endl;
+qout << "inletLength " << inletLength << endl;
+qout << "deltaIn " << deltaIn << endl;
+qout << "inletAmp " << inletAmp << endl;
+qout << "targetInletFlux " << 0.2*inletLength << endl;
+qout << "discreteInletFlux " << int1d(Th1,5)(u01) << endl;
 qout << endl;
 
 qout << "algorithmic parameters" << endl;
