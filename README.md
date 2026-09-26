@@ -155,11 +155,10 @@ $$
 where
 
 $$
-S(s)=\begin{cases}
+S(s)=
 0,&s\leq0,\\
 10s^3-15s^4+6s^5,&0<s<1,\\
 1,&s\geq1.
-\end{cases}
 $$
 
 The inlet velocity is $(u_{\mathrm{in}},0)^\top$, and the total inflow remains $0.2$. The transition length is independent of mesh size. The optimization mesh has 6246 fluid and 1130 porous triangles. The manuscript reports dissipation decreasing from $2.52626\times10^{-4}$ to $1.42063\times10^{-4}$, a reduction of $43.77\%$, with final relative volume error $6.85\times10^{-4}$.
